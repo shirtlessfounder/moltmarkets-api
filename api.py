@@ -1104,7 +1104,6 @@ db = Storage()
 async def get_current_user(
     authorization: Optional[str] = Header(None),
     x_api_key: Optional[str] = Header(None),
-    x_user_id: Optional[str] = Header(None),  # Legacy support
 ) -> dict:
     """
     Authenticate via API key. Returns demo-user for anonymous reads.
@@ -1112,7 +1111,6 @@ async def get_current_user(
     Accepts:
     - Authorization: Bearer mm_xxx
     - X-API-Key: mm_xxx
-    - X-User-ID: user-id (legacy, for backwards compat)
     """
     api_key = None
     
@@ -1130,13 +1128,8 @@ async def get_current_user(
             raise HTTPException(status_code=401, detail="Invalid API key")
         return user
     
-    # Legacy: X-User-ID header (for backwards compat during transition)
-    if x_user_id:
-        user = db.get_user(x_user_id)
-        if not user:
-            # Auto-create for demo purposes (remove in prod)
-            user = db.create_user(x_user_id, f"user_{x_user_id[:8]}")
-        return user
+    # X-User-ID header removed — was a security bypass that allowed unauthenticated user creation
+    # All users must now register via /agents/register and claim via twitter
     
     # No auth provided — use demo user for anonymous reads (read-only, zero balance)
     user = db.get_user("demo-user")
