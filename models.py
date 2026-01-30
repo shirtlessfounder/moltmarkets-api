@@ -129,9 +129,9 @@ class MarketCreated(BaseModel):
 # =============================================================================
 
 class BetRequest(BaseModel):
-    """Request to place a bet."""
+    """Request to place a bet. Max 500ŧ per bet."""
     outcome: Outcome
-    amount: float = Field(..., gt=0, le=1_000_000)
+    amount: float = Field(..., gt=0, le=500, description="Bet amount in ŧ (max 500)")
 
 
 class BetResponse(BaseModel):
