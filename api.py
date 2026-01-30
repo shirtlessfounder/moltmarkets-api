@@ -21,6 +21,7 @@ from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cp
 import secrets
 import hashlib
 import psycopg2
+from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 
 from models import (
@@ -164,7 +165,9 @@ class Storage:
     
     def __init__(self):
         self.database_url = os.getenv("DATABASE_URL")
+        self._pool = None
         if self.database_url:
+            self._init_pool()
             self._init_db()
         else:
             print("Warning: DATABASE_URL not set, using in-memory storage (data will be lost on restart)")
@@ -175,11 +178,12 @@ class Storage:
             self._bets: Dict[str, dict] = {}
             self._positions: Dict[str, Dict[str, dict]] = {}
     
-    def _get_conn(self):
-        """Get a database connection."""
-        # Parse the URL to handle special characters in password
+    def _init_pool(self):
+        """Initialize the connection pool."""
         parsed = urlparse(self.database_url)
-        return psycopg2.connect(
+        self._pool = pool.SimpleConnectionPool(
+            minconn=1,
+            maxconn=10,
             host=parsed.hostname,
             port=parsed.port or 5432,
             user=parsed.username,
@@ -187,6 +191,15 @@ class Storage:
             dbname=parsed.path.lstrip('/'),
             cursor_factory=RealDictCursor
         )
+        print("Connection pool initialized (min=1, max=10)")
+    
+    def _get_conn(self):
+        """Get a database connection from the pool."""
+        return self._pool.getconn()
+    
+    def _put_conn(self, conn):
+        """Return a connection to the pool."""
+        self._pool.putconn(conn)
     
     def _init_db(self):
         """Initialize database tables."""
@@ -311,7 +324,7 @@ class Storage:
                 conn.commit()
                 print("Database tables initialized")
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def _row_to_user(self, row: dict) -> dict:
         """Convert database row to user dict."""
@@ -393,7 +406,7 @@ class Storage:
                 row = cur.fetchone()
                 return self._row_to_user(row)
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def create_user(self, user_id: str, username: str, balance: float = 1000.0, 
                     api_key_hash: str = None, description: str = "",
@@ -429,7 +442,7 @@ class Storage:
                 conn.commit()
                 return self._row_to_user(row)
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def get_user_by_api_key(self, api_key: str) -> Optional[dict]:
         """Find user by API key."""
@@ -447,7 +460,7 @@ class Storage:
                 row = cur.fetchone()
                 return self._row_to_user(row)
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def get_user_by_username(self, username: str) -> Optional[dict]:
         """Find user by username (case-insensitive)."""
@@ -465,7 +478,7 @@ class Storage:
                 row = cur.fetchone()
                 return self._row_to_user(row)
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def update_api_key(self, user_id: str, new_key_hash: str):
         """Update user's API key hash."""
@@ -479,7 +492,7 @@ class Storage:
                 cur.execute("UPDATE users SET api_key_hash = %s WHERE id = %s", (new_key_hash, user_id))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def update_user_balance(self, user_id: str, delta: float) -> float:
         if self._use_memory:
@@ -497,7 +510,7 @@ class Storage:
                 conn.commit()
                 return float(row["balance"])
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def update_user_display_name(self, user_id: str, display_name: str):
         """Update user's display name."""
@@ -511,7 +524,7 @@ class Storage:
                 cur.execute("UPDATE users SET display_name = %s WHERE id = %s", (display_name, user_id))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def delete_user(self, user_id: str):
         """Delete a user and all their data (admin only)."""
@@ -547,7 +560,7 @@ class Storage:
                 cur.execute("UPDATE users SET markets_created = markets_created + 1 WHERE id = %s", (user_id,))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def increment_user_total_bets(self, user_id: str):
         """Increment user's total_bets counter."""
@@ -561,7 +574,7 @@ class Storage:
                 cur.execute("UPDATE users SET total_bets = total_bets + 1 WHERE id = %s", (user_id,))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def update_user_profit(self, user_id: str, profit_delta: float):
         """Update user's profit_all_time."""
@@ -575,7 +588,7 @@ class Storage:
                 cur.execute("UPDATE users SET profit_all_time = profit_all_time + %s WHERE id = %s", (profit_delta, user_id))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def update_user_status(self, user_id: str, status: str):
         """Update user's claim status."""
@@ -589,7 +602,7 @@ class Storage:
                 cur.execute("UPDATE users SET status = %s WHERE id = %s", (status, user_id))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def update_user_last_market_created(self, user_id: str):
         """Update timestamp when user last created a market (for rate limiting)."""
@@ -607,7 +620,7 @@ class Storage:
                 )
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def update_user_twitter_handle(self, user_id: str, twitter_handle: str):
         """Update user's twitter handle (from verification tweet)."""
@@ -621,7 +634,7 @@ class Storage:
                 cur.execute("UPDATE users SET twitter_handle = %s WHERE id = %s", (twitter_handle, user_id))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     @property
     def users(self) -> Dict[str, dict]:
@@ -636,7 +649,7 @@ class Storage:
                 rows = cur.fetchall()
                 return {row["id"]: self._row_to_user(row) for row in rows}
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     # --- Markets ---
     
@@ -651,7 +664,7 @@ class Storage:
                 row = cur.fetchone()
                 return self._row_to_market(row)
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def list_markets(self) -> List[dict]:
         if self._use_memory:
@@ -664,7 +677,7 @@ class Storage:
                 rows = cur.fetchall()
                 return [self._row_to_market(row) for row in rows]
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     @property
     def markets(self) -> Dict[str, dict]:
@@ -714,7 +727,7 @@ class Storage:
                 conn.commit()
                 return self._row_to_market(row)
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def update_market_pool(self, market_id: str, new_pool: dict, new_p: float, volume_delta: float):
         if self._use_memory:
@@ -734,7 +747,7 @@ class Storage:
                 """, (new_pool["YES"], new_pool["NO"], new_p, volume_delta, market_id))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def resolve_market(self, market_id: str, outcome: Outcome):
         if self._use_memory:
@@ -754,7 +767,7 @@ class Storage:
                 """, (MarketStatus.RESOLVED.value, outcome.value, datetime.now(timezone.utc), market_id))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     # --- Bets ---
     
@@ -795,7 +808,7 @@ class Storage:
                 conn.commit()
                 return self._row_to_bet(row)
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def get_bets_for_market(self, market_id: str) -> List[dict]:
         """Get all bets for a market."""
@@ -809,7 +822,7 @@ class Storage:
                 rows = cur.fetchall()
                 return [self._row_to_bet(row) for row in rows]
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def get_bets_for_user(self, user_id: str) -> List[dict]:
         """Get all bets for a user."""
@@ -823,7 +836,7 @@ class Storage:
                 rows = cur.fetchall()
                 return [self._row_to_bet(row) for row in rows]
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     @property
     def bets(self) -> Dict[str, dict]:
@@ -838,7 +851,7 @@ class Storage:
                 rows = cur.fetchall()
                 return {row["id"]: self._row_to_bet(row) for row in rows}
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     # --- Positions ---
     
@@ -853,7 +866,7 @@ class Storage:
                 row = cur.fetchone()
                 return self._row_to_position(row)
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def get_market_positions(self, market_id: str) -> List[dict]:
         if self._use_memory:
@@ -866,7 +879,7 @@ class Storage:
                 rows = cur.fetchall()
                 return [self._row_to_position(row) for row in rows]
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def update_position(self, market_id: str, user_id: str, 
                         outcome: Outcome, shares_delta: float, invested_delta: float):
@@ -911,7 +924,7 @@ class Storage:
                     """, (market_id, user_id, shares_delta, invested_delta, shares_delta, invested_delta))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def reduce_position(self, market_id: str, user_id: str, 
                         outcome: Outcome, shares: float):
@@ -942,7 +955,7 @@ class Storage:
                     """, (shares, market_id, user_id))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     # --- Comments ---
     
@@ -974,7 +987,7 @@ class Storage:
                 """, (comment_id, market_id, user_id, content, parent_id, now))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
         return comment
     
     def get_market_comments(self, market_id: str) -> List[dict]:
@@ -1000,7 +1013,7 @@ class Storage:
                 rows = cur.fetchall()
                 return [dict(row) for row in rows]
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     # --- Resolution Votes ---
     
@@ -1031,7 +1044,7 @@ class Storage:
                     ))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def get_resolution_votes(self, market_id: str) -> List[dict]:
         """Get all resolution votes for a market."""
@@ -1057,7 +1070,7 @@ class Storage:
                     for row in rows
                 ]
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     # --- Utility ---
     
