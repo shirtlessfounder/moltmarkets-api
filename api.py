@@ -1248,6 +1248,13 @@ async def get_market(market_id: str):
 @app.post("/markets", response_model=MarketCreated)
 async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
     """Create a new prediction market."""
+    # Require twitter verification before creating markets
+    if user.get("status") != "claimed":
+        raise HTTPException(
+            status_code=403,
+            detail="Twitter verification required before creating markets. Visit /claim/{user_id} to link your Twitter account."
+        )
+    
     if req.closes_at <= datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="closes_at must be in the future")
     
@@ -1359,6 +1366,13 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
 @app.post("/markets/{market_id}/bet", response_model=BetResponse)
 async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(require_auth)):
     """Place a bet on a market."""
+    # Require twitter verification before trading
+    if user.get("status") != "claimed":
+        raise HTTPException(
+            status_code=403,
+            detail="Twitter verification required before trading. Visit /claim/{user_id} to link your Twitter account."
+        )
+    
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
@@ -1432,6 +1446,13 @@ async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(requir
 @app.post("/markets/{market_id}/sell", response_model=SellResponse)
 async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(require_auth)):
     """Sell shares back to the market."""
+    # Require twitter verification before trading
+    if user.get("status") != "claimed":
+        raise HTTPException(
+            status_code=403,
+            detail="Twitter verification required before trading. Visit /claim/{user_id} to link your Twitter account."
+        )
+    
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
