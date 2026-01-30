@@ -30,6 +30,7 @@ from models import (
     ProbabilityPoint, MarketHistory, BetHistoryItem,
     AgentRegister, AgentRegistered, AgentRegisteredWithClaim, AgentKeyReset,
     ClaimPageInfo, ClaimRequest, ClaimResponse, AgentStatus,
+    CommentCreate, Comment, MarketComments,
     MarketStatus, Outcome,
 )
 import random
@@ -265,7 +266,20 @@ class Storage:
                     )
                 """)
                 
+                # Comments table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS comments (
+                        id VARCHAR(255) PRIMARY KEY,
+                        market_id VARCHAR(255) REFERENCES markets(id),
+                        user_id VARCHAR(255) REFERENCES users(id),
+                        content TEXT NOT NULL,
+                        parent_id VARCHAR(255),
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                
                 # Create indexes for common queries
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_comments_market ON comments(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_market ON bets(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_user ON bets(user_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_status ON markets(status)")
@@ -869,6 +883,64 @@ class Storage:
         finally:
             conn.close()
     
+    # --- Comments ---
+    
+    def create_comment(self, comment_id: str, market_id: str, user_id: str, 
+                       content: str, parent_id: Optional[str] = None) -> dict:
+        """Create a new comment on a market."""
+        now = datetime.now(timezone.utc)
+        comment = {
+            "id": comment_id,
+            "market_id": market_id,
+            "user_id": user_id,
+            "content": content,
+            "parent_id": parent_id,
+            "created_at": now,
+        }
+        
+        if self._use_memory:
+            if not hasattr(self, '_comments'):
+                self._comments = {}
+            self._comments[comment_id] = comment
+            return comment
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO comments (id, market_id, user_id, content, parent_id, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (comment_id, market_id, user_id, content, parent_id, now))
+                conn.commit()
+        finally:
+            conn.close()
+        return comment
+    
+    def get_market_comments(self, market_id: str) -> List[dict]:
+        """Get all comments for a market, ordered by creation time."""
+        if self._use_memory:
+            if not hasattr(self, '_comments'):
+                return []
+            return sorted(
+                [c for c in self._comments.values() if c["market_id"] == market_id],
+                key=lambda x: x["created_at"]
+            )
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT c.*, u.username 
+                    FROM comments c
+                    JOIN users u ON c.user_id = u.id
+                    WHERE c.market_id = %s
+                    ORDER BY c.created_at ASC
+                """, (market_id,))
+                rows = cur.fetchall()
+                return [dict(row) for row in rows]
+        finally:
+            conn.close()
+    
     # --- Utility ---
     
     def _save(self):
@@ -1340,6 +1412,86 @@ async def get_market_bets(market_id: str):
         ))
     
     return items
+
+
+# =============================================================================
+# Comment Endpoints
+# =============================================================================
+
+@app.get("/markets/{market_id}/comments", response_model=MarketComments)
+async def get_comments(market_id: str):
+    """Get all comments for a market."""
+    market = db.get_market(market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    
+    raw_comments = db.get_market_comments(market_id)
+    
+    # Build comment tree (top-level + replies)
+    comments_by_id = {}
+    top_level = []
+    
+    for c in raw_comments:
+        comment = Comment(
+            id=c["id"],
+            market_id=c["market_id"],
+            user_id=c["user_id"],
+            username=c.get("username", "unknown"),
+            content=c["content"],
+            created_at=c["created_at"],
+            parent_id=c.get("parent_id"),
+            replies=[],
+        )
+        comments_by_id[c["id"]] = comment
+        
+        if c.get("parent_id") is None:
+            top_level.append(comment)
+    
+    # Attach replies to parents
+    for c in raw_comments:
+        if c.get("parent_id") and c["parent_id"] in comments_by_id:
+            parent = comments_by_id[c["parent_id"]]
+            parent.replies.append(comments_by_id[c["id"]])
+    
+    return MarketComments(
+        market_id=market_id,
+        comments=top_level,
+        total=len(raw_comments),
+    )
+
+
+@app.post("/markets/{market_id}/comments", response_model=Comment)
+async def create_comment(market_id: str, req: CommentCreate, user: dict = Depends(get_current_user)):
+    """Create a comment on a market."""
+    market = db.get_market(market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    
+    # Validate parent comment exists if replying
+    if req.parent_id:
+        parent_comments = db.get_market_comments(market_id)
+        if not any(c["id"] == req.parent_id for c in parent_comments):
+            raise HTTPException(status_code=400, detail="Parent comment not found")
+    
+    comment_id = str(uuid.uuid4())
+    comment = db.create_comment(
+        comment_id=comment_id,
+        market_id=market_id,
+        user_id=user["id"],
+        content=req.content,
+        parent_id=req.parent_id,
+    )
+    
+    return Comment(
+        id=comment["id"],
+        market_id=comment["market_id"],
+        user_id=comment["user_id"],
+        username=user["username"],
+        content=comment["content"],
+        created_at=comment["created_at"],
+        parent_id=comment.get("parent_id"),
+        replies=[],
+    )
 
 
 # =============================================================================
