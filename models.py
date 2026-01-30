@@ -94,6 +94,24 @@ class BetResponse(BaseModel):
     created_at: datetime
 
 
+class SellRequest(BaseModel):
+    """Request to sell shares."""
+    outcome: Outcome
+    shares: float = Field(..., gt=0, le=1_000_000)
+
+
+class SellResponse(BaseModel):
+    """Result of selling shares."""
+    market_id: str
+    user_id: str
+    outcome: Outcome
+    shares_sold: float
+    amount_received: float
+    fee_paid: float
+    probability_before: float
+    probability_after: float
+
+
 class Position(BaseModel):
     """User's position in a market."""
     user_id: str
