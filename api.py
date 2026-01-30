@@ -60,6 +60,7 @@ TRADE_FEE_RATE = 0.02  # 2% total fee
 CREATOR_FEE_SHARE = 0.5  # 50% of fee goes to market creator (1%)
 # Remaining 50% (1%) is burned (not allocated to anyone)
 
+MARKET_CREATION_COST = 100             # Cost in ŧ to create a market (funds the initial liquidity pool)
 MARKET_CREATION_COOLDOWN_MINUTES = 30  # Rate limit for market creation
 MAX_MARKET_DURATION_SECONDS = 3600     # 1 hour — hard cap during testing phase
 
@@ -1315,6 +1316,13 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
             detail="Market duration cannot exceed 1 hour during testing phase",
         )
 
+    # Check creator has enough balance to fund the initial liquidity pool
+    if user["balance"] < MARKET_CREATION_COST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient balance. Market creation costs {MARKET_CREATION_COST}{CURRENCY_SYMBOL}."
+        )
+
     # Rate limit check: 1 market per MARKET_CREATION_COOLDOWN_MINUTES
     last_created = user.get("last_market_created_at")
     if last_created:
@@ -1329,6 +1337,9 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
                 detail=f"Rate limit: you can create another market in {remaining:.0f} minutes"
             )
     
+    # Deduct creation cost from creator's balance (funds the initial liquidity pool)
+    db.update_user_balance(user["id"], -MARKET_CREATION_COST)
+
     market_id = str(uuid.uuid4())
     market = db.create_market(
         market_id=market_id,
@@ -1370,6 +1381,7 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
         creator_username=user["username"],
         pool=market["pool"],
         p=market["p"],
+        creation_cost=MARKET_CREATION_COST,
         tip=tip,
         warning=warning,
     )
