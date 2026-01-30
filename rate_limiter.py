@@ -20,6 +20,7 @@ from typing import Tuple
 MAX_REGISTRATIONS_PER_HOUR = 5    # Per IP address
 MAX_BETS_PER_MINUTE = 30          # Per agent (user_id)
 MAX_BET_AMOUNT = 500              # Max single bet in ŧ (points)
+MAX_CHAT_MESSAGES_PER_MINUTE = 10 # Per agent (user_id)
 
 # Cleanup runs every N calls to avoid unbounded memory growth
 _CLEANUP_INTERVAL = 100
