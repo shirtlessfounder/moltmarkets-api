@@ -44,7 +44,10 @@ import re
 # Verification Code Generation
 # =============================================================================
 
-VERIFICATION_WORDS = ["crab", "shell", "reef", "wave", "tide", "coral", "kelp", "pearl", "anchor", "lobster"]
+VERIFICATION_WORDS = [
+    "crab", "shell", "reef", "wave", "tide", "coral", "kelp", "pearl", "anchor", "lobster",
+    "orca", "squid", "trout", "shark", "whale", "dune", "marsh", "delta", "fjord", "shoal",
+]
 
 
 # =============================================================================
@@ -59,10 +62,16 @@ MARKET_CREATION_COOLDOWN_MINUTES = 30  # Rate limit for market creation
 
 
 def generate_verification_code() -> str:
-    """Generate a verification code like 'crab-A1B2'."""
-    word = random.choice(VERIFICATION_WORDS)
-    chars = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=4))
-    return f"{word}-{chars}"
+    """Generate a cryptographically secure verification code like 'crab-reef-A1B2C3D4'.
+
+    Uses secrets module for randomness.  Two words (20 options each) + 8 alphanumeric
+    chars gives ~20^2 * 36^8 ≈ 1.1 trillion possibilities — infeasible to brute-force.
+    """
+    _alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    word1 = secrets.choice(VERIFICATION_WORDS)
+    word2 = secrets.choice(VERIFICATION_WORDS)
+    chars = ''.join(secrets.choice(_alphabet) for _ in range(8))
+    return f"{word1}-{word2}-{chars}"
 
 
 def is_valid_twitter_url(url: str) -> bool:
@@ -1129,10 +1138,10 @@ async def get_current_user(
             user = db.create_user(x_user_id, f"user_{x_user_id[:8]}")
         return user
     
-    # No auth provided — use demo user for anonymous reads
+    # No auth provided — use demo user for anonymous reads (read-only, zero balance)
     user = db.get_user("demo-user")
     if not user:
-        user = db.create_user("demo-user", "demo_user", balance=10000.0)
+        user = db.create_user("demo-user", "demo_user", balance=0.0)
     return user
 
 
@@ -1172,9 +1181,9 @@ async def require_auth(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: seed demo data if empty
+    # Startup: seed read-only demo user for unauthenticated access (zero balance)
     if not db.get_user("demo-user"):
-        db.create_user("demo-user", "demo_user", balance=10000.0)
+        db.create_user("demo-user", "demo_user", balance=0.0)
     market_count = len(db.list_markets())
     user_count = len(db.users)
     print(f"MoltMarkets API started with {market_count} markets, {user_count} users")
@@ -1190,9 +1199,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS: restrict to known origins. Override via CORS_ORIGINS env var (comma-separated).
+_default_origins = [
+    "https://moltmarkets.com",
+    "https://www.moltmarkets.com",
+    "http://localhost:3000",
+    "http://localhost:5173",
+]
+_cors_origins = os.getenv("CORS_ORIGINS")
+ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(",") if o.strip()] if _cors_origins else _default_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
