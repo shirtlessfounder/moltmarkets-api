@@ -2,7 +2,7 @@
 MoltMarkets API — FastAPI application.
 
 Binary prediction markets with CPMM market maker.
-Uses JSON file persistence (upgrade to Postgres later).
+Uses PostgreSQL for persistence.
 """
 
 import os
@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
-from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from cpmm import CpmmState, calculate_cpmm_purchase, get_cpmm_probability, Outcome as CpmmOutcome
 import secrets
 import hashlib
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 from models import (
     MarketCreate, MarketResolve, MarketSummary, MarketDetail,
@@ -39,246 +41,645 @@ def hash_api_key(key: str) -> str:
     """Hash an API key for storage."""
     return hashlib.sha256(key.encode()).hexdigest()
 
-# Persistence file path (use env var for Railway volume or default to local)
-_data_path = os.getenv("DATA_PATH", "/data/moltmarkets.json")
-# Fallback to current directory if /data doesn't exist (local dev)
-if not os.path.exists("/data"):
-    _data_path = "./moltmarkets.json"
-DATA_FILE = Path(_data_path)
-
 
 # =============================================================================
-# In-Memory Storage (swap for DB later)
+# PostgreSQL Storage
 # =============================================================================
 
 class Storage:
     """
-    In-memory storage with JSON file persistence.
+    PostgreSQL storage backend.
     
-    All methods are sync for now — make async when adding real DB.
+    Uses DATABASE_URL environment variable (Railway provides this automatically).
+    Falls back to JSON file storage if DATABASE_URL is not set.
     """
     
     def __init__(self):
-        self.markets: Dict[str, dict] = {}
-        self.users: Dict[str, dict] = {}
-        self.bets: Dict[str, dict] = {}
-        self.positions: Dict[str, Dict[str, dict]] = {}  # market_id -> user_id -> position
-        self._load()
+        self.database_url = os.getenv("DATABASE_URL")
+        if self.database_url:
+            self._init_db()
+        else:
+            print("Warning: DATABASE_URL not set, using in-memory storage (data will be lost on restart)")
+            # Fallback to in-memory for local dev without DB
+            self._use_memory = True
+            self._markets: Dict[str, dict] = {}
+            self._users: Dict[str, dict] = {}
+            self._bets: Dict[str, dict] = {}
+            self._positions: Dict[str, Dict[str, dict]] = {}
     
-    def _serialize_datetime(self, obj):
-        """Convert datetime objects to ISO strings for JSON."""
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        elif isinstance(obj, dict):
-            return {k: self._serialize_datetime(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self._serialize_datetime(i) for i in obj]
-        elif isinstance(obj, MarketStatus):
-            return obj.value
-        elif isinstance(obj, Outcome):
-            return obj.value
-        return obj
+    def _get_conn(self):
+        """Get a database connection."""
+        return psycopg2.connect(self.database_url, cursor_factory=RealDictCursor)
     
-    def _deserialize_datetime(self, obj, datetime_keys=None):
-        """Convert ISO strings back to datetime objects."""
-        datetime_keys = datetime_keys or {"created_at", "closes_at", "resolved_at"}
-        if isinstance(obj, dict):
-            result = {}
-            for k, v in obj.items():
-                if k in datetime_keys and isinstance(v, str):
-                    try:
-                        result[k] = datetime.fromisoformat(v)
-                    except:
-                        result[k] = v
-                elif k == "status" and isinstance(v, str):
-                    result[k] = MarketStatus(v)
-                elif k == "resolution" and isinstance(v, str):
-                    result[k] = Outcome(v)
-                elif k == "outcome" and isinstance(v, str):
-                    result[k] = Outcome(v)
-                else:
-                    result[k] = self._deserialize_datetime(v, datetime_keys)
-            return result
-        elif isinstance(obj, list):
-            return [self._deserialize_datetime(i, datetime_keys) for i in obj]
-        return obj
-    
-    def _save(self):
-        """Save state to JSON file."""
+    def _init_db(self):
+        """Initialize database tables."""
+        self._use_memory = False
+        conn = self._get_conn()
         try:
-            DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-            data = {
-                "markets": self._serialize_datetime(self.markets),
-                "users": self._serialize_datetime(self.users),
-                "bets": self._serialize_datetime(self.bets),
-                "positions": self._serialize_datetime(self.positions),
-            }
-            with open(DATA_FILE, "w") as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            print(f"Warning: Failed to save data: {e}")
+            with conn.cursor() as cur:
+                # Users table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id VARCHAR(255) PRIMARY KEY,
+                        username VARCHAR(255) UNIQUE NOT NULL,
+                        display_name VARCHAR(255),
+                        description TEXT DEFAULT '',
+                        balance DECIMAL(20, 8) DEFAULT 1000.0,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        markets_created INTEGER DEFAULT 0,
+                        total_bets INTEGER DEFAULT 0,
+                        profit_all_time DECIMAL(20, 8) DEFAULT 0.0,
+                        api_key_hash VARCHAR(255)
+                    )
+                """)
+                
+                # Markets table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS markets (
+                        id VARCHAR(255) PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        description TEXT,
+                        status VARCHAR(50) DEFAULT 'open',
+                        closes_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        resolved_at TIMESTAMP WITH TIME ZONE,
+                        resolution VARCHAR(50),
+                        total_volume DECIMAL(20, 8) DEFAULT 0.0,
+                        creator_id VARCHAR(255) REFERENCES users(id),
+                        pool_yes DECIMAL(20, 8) DEFAULT 100.0,
+                        pool_no DECIMAL(20, 8) DEFAULT 100.0,
+                        p DECIMAL(10, 8) DEFAULT 0.5
+                    )
+                """)
+                
+                # Bets table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS bets (
+                        id VARCHAR(255) PRIMARY KEY,
+                        market_id VARCHAR(255) REFERENCES markets(id),
+                        user_id VARCHAR(255) REFERENCES users(id),
+                        outcome VARCHAR(50) NOT NULL,
+                        amount DECIMAL(20, 8) NOT NULL,
+                        shares DECIMAL(20, 8) NOT NULL,
+                        avg_price DECIMAL(20, 8),
+                        probability_before DECIMAL(10, 8),
+                        probability_after DECIMAL(10, 8),
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                
+                # Positions table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS positions (
+                        market_id VARCHAR(255) REFERENCES markets(id),
+                        user_id VARCHAR(255) REFERENCES users(id),
+                        yes_shares DECIMAL(20, 8) DEFAULT 0.0,
+                        no_shares DECIMAL(20, 8) DEFAULT 0.0,
+                        total_invested DECIMAL(20, 8) DEFAULT 0.0,
+                        PRIMARY KEY (market_id, user_id)
+                    )
+                """)
+                
+                # Create indexes for common queries
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_market ON bets(market_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_user ON bets(user_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_status ON markets(status)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_users_api_key ON users(api_key_hash)")
+                
+                conn.commit()
+                print("Database tables initialized")
+        finally:
+            conn.close()
     
-    def _load(self):
-        """Load state from JSON file."""
-        try:
-            if DATA_FILE.exists():
-                with open(DATA_FILE, "r") as f:
-                    data = json.load(f)
-                self.markets = self._deserialize_datetime(data.get("markets", {}))
-                self.users = self._deserialize_datetime(data.get("users", {}))
-                self.bets = self._deserialize_datetime(data.get("bets", {}))
-                self.positions = self._deserialize_datetime(data.get("positions", {}))
-                print(f"Loaded {len(self.markets)} markets, {len(self.users)} users from {DATA_FILE}")
-        except Exception as e:
-            print(f"Warning: Failed to load data: {e}")
+    def _row_to_user(self, row: dict) -> dict:
+        """Convert database row to user dict."""
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "username": row["username"],
+            "display_name": row["display_name"] or row["username"],
+            "description": row["description"] or "",
+            "balance": float(row["balance"]),
+            "created_at": row["created_at"],
+            "markets_created": row["markets_created"],
+            "total_bets": row["total_bets"],
+            "profit_all_time": float(row["profit_all_time"]),
+            "api_key_hash": row["api_key_hash"],
+        }
+    
+    def _row_to_market(self, row: dict) -> dict:
+        """Convert database row to market dict."""
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "title": row["title"],
+            "description": row["description"],
+            "status": MarketStatus(row["status"]),
+            "closes_at": row["closes_at"],
+            "created_at": row["created_at"],
+            "resolved_at": row["resolved_at"],
+            "resolution": Outcome(row["resolution"]) if row["resolution"] else None,
+            "total_volume": float(row["total_volume"]),
+            "creator_id": row["creator_id"],
+            "pool": {"YES": float(row["pool_yes"]), "NO": float(row["pool_no"])},
+            "p": float(row["p"]),
+        }
+    
+    def _row_to_bet(self, row: dict) -> dict:
+        """Convert database row to bet dict."""
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "market_id": row["market_id"],
+            "user_id": row["user_id"],
+            "outcome": Outcome(row["outcome"]),
+            "amount": float(row["amount"]),
+            "shares": float(row["shares"]),
+            "avg_price": float(row["avg_price"]) if row["avg_price"] else 0,
+            "probability_before": float(row["probability_before"]) if row["probability_before"] else 0,
+            "probability_after": float(row["probability_after"]) if row["probability_after"] else 0,
+            "created_at": row["created_at"],
+        }
+    
+    def _row_to_position(self, row: dict) -> dict:
+        """Convert database row to position dict."""
+        if not row:
+            return None
+        return {
+            "market_id": row["market_id"],
+            "user_id": row["user_id"],
+            "yes_shares": float(row["yes_shares"]),
+            "no_shares": float(row["no_shares"]),
+            "total_invested": float(row["total_invested"]),
+        }
     
     # --- Users ---
     
     def get_user(self, user_id: str) -> Optional[dict]:
-        return self.users.get(user_id)
+        if self._use_memory:
+            return self._users.get(user_id)
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+                row = cur.fetchone()
+                return self._row_to_user(row)
+        finally:
+            conn.close()
     
     def create_user(self, user_id: str, username: str, balance: float = 1000.0, 
                     api_key_hash: str = None, description: str = "") -> dict:
-        user = {
-            "id": user_id,
-            "username": username,
-            "display_name": username,
-            "description": description,
-            "balance": balance,
-            "created_at": datetime.now(timezone.utc),
-            "markets_created": 0,
-            "total_bets": 0,
-            "profit_all_time": 0.0,
-            "api_key_hash": api_key_hash,
-        }
-        self.users[user_id] = user
-        self._save()
-        return user
+        if self._use_memory:
+            user = {
+                "id": user_id,
+                "username": username,
+                "display_name": username,
+                "description": description,
+                "balance": balance,
+                "created_at": datetime.now(timezone.utc),
+                "markets_created": 0,
+                "total_bets": 0,
+                "profit_all_time": 0.0,
+                "api_key_hash": api_key_hash,
+            }
+            self._users[user_id] = user
+            return user
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO users (id, username, display_name, description, balance, api_key_hash)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                """, (user_id, username, username, description, balance, api_key_hash))
+                row = cur.fetchone()
+                conn.commit()
+                return self._row_to_user(row)
+        finally:
+            conn.close()
     
     def get_user_by_api_key(self, api_key: str) -> Optional[dict]:
         """Find user by API key."""
         key_hash = hash_api_key(api_key)
-        for user in self.users.values():
-            if user.get("api_key_hash") == key_hash:
-                return user
-        return None
+        if self._use_memory:
+            for user in self._users.values():
+                if user.get("api_key_hash") == key_hash:
+                    return user
+            return None
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM users WHERE api_key_hash = %s", (key_hash,))
+                row = cur.fetchone()
+                return self._row_to_user(row)
+        finally:
+            conn.close()
     
     def get_user_by_username(self, username: str) -> Optional[dict]:
         """Find user by username."""
-        for user in self.users.values():
-            if user.get("username") == username:
-                return user
-        return None
+        if self._use_memory:
+            for user in self._users.values():
+                if user.get("username") == username:
+                    return user
+            return None
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM users WHERE username = %s", (username,))
+                row = cur.fetchone()
+                return self._row_to_user(row)
+        finally:
+            conn.close()
     
     def update_api_key(self, user_id: str, new_key_hash: str):
         """Update user's API key hash."""
-        self.users[user_id]["api_key_hash"] = new_key_hash
-        self._save()
+        if self._use_memory:
+            self._users[user_id]["api_key_hash"] = new_key_hash
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET api_key_hash = %s WHERE id = %s", (new_key_hash, user_id))
+                conn.commit()
+        finally:
+            conn.close()
     
     def update_user_balance(self, user_id: str, delta: float) -> float:
-        self.users[user_id]["balance"] += delta
-        self._save()
-        return self.users[user_id]["balance"]
+        if self._use_memory:
+            self._users[user_id]["balance"] += delta
+            return self._users[user_id]["balance"]
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE users SET balance = balance + %s WHERE id = %s
+                    RETURNING balance
+                """, (delta, user_id))
+                row = cur.fetchone()
+                conn.commit()
+                return float(row["balance"])
+        finally:
+            conn.close()
+    
+    def update_user_display_name(self, user_id: str, display_name: str):
+        """Update user's display name."""
+        if self._use_memory:
+            self._users[user_id]["display_name"] = display_name
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET display_name = %s WHERE id = %s", (display_name, user_id))
+                conn.commit()
+        finally:
+            conn.close()
+    
+    def increment_user_markets_created(self, user_id: str):
+        """Increment user's markets_created counter."""
+        if self._use_memory:
+            self._users[user_id]["markets_created"] += 1
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET markets_created = markets_created + 1 WHERE id = %s", (user_id,))
+                conn.commit()
+        finally:
+            conn.close()
+    
+    def increment_user_total_bets(self, user_id: str):
+        """Increment user's total_bets counter."""
+        if self._use_memory:
+            self._users[user_id]["total_bets"] += 1
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET total_bets = total_bets + 1 WHERE id = %s", (user_id,))
+                conn.commit()
+        finally:
+            conn.close()
+    
+    def update_user_profit(self, user_id: str, profit_delta: float):
+        """Update user's profit_all_time."""
+        if self._use_memory:
+            self._users[user_id]["profit_all_time"] += profit_delta
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET profit_all_time = profit_all_time + %s WHERE id = %s", (profit_delta, user_id))
+                conn.commit()
+        finally:
+            conn.close()
+    
+    @property
+    def users(self) -> Dict[str, dict]:
+        """Get all users (for leaderboard etc.)."""
+        if self._use_memory:
+            return self._users
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM users")
+                rows = cur.fetchall()
+                return {row["id"]: self._row_to_user(row) for row in rows}
+        finally:
+            conn.close()
     
     # --- Markets ---
     
     def get_market(self, market_id: str) -> Optional[dict]:
-        return self.markets.get(market_id)
+        if self._use_memory:
+            return self._markets.get(market_id)
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM markets WHERE id = %s", (market_id,))
+                row = cur.fetchone()
+                return self._row_to_market(row)
+        finally:
+            conn.close()
     
     def list_markets(self) -> List[dict]:
-        return list(self.markets.values())
+        if self._use_memory:
+            return list(self._markets.values())
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM markets ORDER BY created_at DESC")
+                rows = cur.fetchall()
+                return [self._row_to_market(row) for row in rows]
+        finally:
+            conn.close()
+    
+    @property
+    def markets(self) -> Dict[str, dict]:
+        """Get all markets as dict."""
+        if self._use_memory:
+            return self._markets
+        
+        markets_list = self.list_markets()
+        return {m["id"]: m for m in markets_list}
     
     def create_market(self, market_id: str, creator_id: str, title: str,
                       description: str, closes_at: datetime, 
                       initial_liquidity: float) -> dict:
-        # Initialize balanced CPMM pool
-        pool = {"YES": initial_liquidity, "NO": initial_liquidity}
+        if self._use_memory:
+            pool = {"YES": initial_liquidity, "NO": initial_liquidity}
+            market = {
+                "id": market_id,
+                "title": title,
+                "description": description,
+                "status": MarketStatus.OPEN,
+                "closes_at": closes_at,
+                "created_at": datetime.now(timezone.utc),
+                "resolved_at": None,
+                "resolution": None,
+                "total_volume": 0.0,
+                "creator_id": creator_id,
+                "pool": pool,
+                "p": 0.5,
+            }
+            self._markets[market_id] = market
+            self._positions[market_id] = {}
+            self._users[creator_id]["markets_created"] += 1
+            return market
         
-        market = {
-            "id": market_id,
-            "title": title,
-            "description": description,
-            "status": MarketStatus.OPEN,
-            "closes_at": closes_at,
-            "created_at": datetime.now(timezone.utc),
-            "resolved_at": None,
-            "resolution": None,
-            "total_volume": 0.0,
-            "creator_id": creator_id,
-            "pool": pool,
-            "p": 0.5,  # Start at 50%
-        }
-        self.markets[market_id] = market
-        self.positions[market_id] = {}
-        self.users[creator_id]["markets_created"] += 1
-        self._save()
-        return market
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO markets (id, title, description, closes_at, creator_id, pool_yes, pool_no, p)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                """, (market_id, title, description, closes_at, creator_id, initial_liquidity, initial_liquidity, 0.5))
+                row = cur.fetchone()
+                
+                # Increment user's markets_created
+                cur.execute("UPDATE users SET markets_created = markets_created + 1 WHERE id = %s", (creator_id,))
+                conn.commit()
+                return self._row_to_market(row)
+        finally:
+            conn.close()
     
     def update_market_pool(self, market_id: str, new_pool: dict, new_p: float, volume_delta: float):
-        market = self.markets[market_id]
-        market["pool"] = new_pool
-        market["p"] = new_p
-        market["total_volume"] += volume_delta
-        self._save()
+        if self._use_memory:
+            market = self._markets[market_id]
+            market["pool"] = new_pool
+            market["p"] = new_p
+            market["total_volume"] += volume_delta
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE markets 
+                    SET pool_yes = %s, pool_no = %s, p = %s, total_volume = total_volume + %s
+                    WHERE id = %s
+                """, (new_pool["YES"], new_pool["NO"], new_p, volume_delta, market_id))
+                conn.commit()
+        finally:
+            conn.close()
     
     def resolve_market(self, market_id: str, outcome: Outcome):
-        market = self.markets[market_id]
-        market["status"] = MarketStatus.RESOLVED
-        market["resolution"] = outcome
-        market["resolved_at"] = datetime.now(timezone.utc)
-        self._save()
+        if self._use_memory:
+            market = self._markets[market_id]
+            market["status"] = MarketStatus.RESOLVED
+            market["resolution"] = outcome
+            market["resolved_at"] = datetime.now(timezone.utc)
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE markets 
+                    SET status = %s, resolution = %s, resolved_at = %s
+                    WHERE id = %s
+                """, (MarketStatus.RESOLVED.value, outcome.value, datetime.now(timezone.utc), market_id))
+                conn.commit()
+        finally:
+            conn.close()
     
     # --- Bets ---
     
     def create_bet(self, bet_id: str, market_id: str, user_id: str,
                    outcome: Outcome, amount: float, shares: float,
                    prob_before: float, prob_after: float) -> dict:
-        bet = {
-            "id": bet_id,
-            "market_id": market_id,
-            "user_id": user_id,
-            "outcome": outcome,
-            "amount": amount,
-            "shares": shares,
-            "avg_price": amount / shares if shares > 0 else 0,
-            "probability_before": prob_before,
-            "probability_after": prob_after,
-            "created_at": datetime.now(timezone.utc),
-        }
-        self.bets[bet_id] = bet
-        self.users[user_id]["total_bets"] += 1
-        self._save()
-        return bet
+        avg_price = amount / shares if shares > 0 else 0
+        
+        if self._use_memory:
+            bet = {
+                "id": bet_id,
+                "market_id": market_id,
+                "user_id": user_id,
+                "outcome": outcome,
+                "amount": amount,
+                "shares": shares,
+                "avg_price": avg_price,
+                "probability_before": prob_before,
+                "probability_after": prob_after,
+                "created_at": datetime.now(timezone.utc),
+            }
+            self._bets[bet_id] = bet
+            self._users[user_id]["total_bets"] += 1
+            return bet
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO bets (id, market_id, user_id, outcome, amount, shares, avg_price, probability_before, probability_after)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                """, (bet_id, market_id, user_id, outcome.value, amount, shares, avg_price, prob_before, prob_after))
+                row = cur.fetchone()
+                
+                # Increment user's total_bets
+                cur.execute("UPDATE users SET total_bets = total_bets + 1 WHERE id = %s", (user_id,))
+                conn.commit()
+                return self._row_to_bet(row)
+        finally:
+            conn.close()
+    
+    def get_bets_for_market(self, market_id: str) -> List[dict]:
+        """Get all bets for a market."""
+        if self._use_memory:
+            return [b for b in self._bets.values() if b["market_id"] == market_id]
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM bets WHERE market_id = %s ORDER BY created_at", (market_id,))
+                rows = cur.fetchall()
+                return [self._row_to_bet(row) for row in rows]
+        finally:
+            conn.close()
+    
+    def get_bets_for_user(self, user_id: str) -> List[dict]:
+        """Get all bets for a user."""
+        if self._use_memory:
+            return [b for b in self._bets.values() if b["user_id"] == user_id]
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM bets WHERE user_id = %s ORDER BY created_at", (user_id,))
+                rows = cur.fetchall()
+                return [self._row_to_bet(row) for row in rows]
+        finally:
+            conn.close()
+    
+    @property
+    def bets(self) -> Dict[str, dict]:
+        """Get all bets as dict."""
+        if self._use_memory:
+            return self._bets
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM bets")
+                rows = cur.fetchall()
+                return {row["id"]: self._row_to_bet(row) for row in rows}
+        finally:
+            conn.close()
     
     # --- Positions ---
     
     def get_position(self, market_id: str, user_id: str) -> Optional[dict]:
-        return self.positions.get(market_id, {}).get(user_id)
+        if self._use_memory:
+            return self._positions.get(market_id, {}).get(user_id)
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM positions WHERE market_id = %s AND user_id = %s", (market_id, user_id))
+                row = cur.fetchone()
+                return self._row_to_position(row)
+        finally:
+            conn.close()
     
     def get_market_positions(self, market_id: str) -> List[dict]:
-        return list(self.positions.get(market_id, {}).values())
+        if self._use_memory:
+            return list(self._positions.get(market_id, {}).values())
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM positions WHERE market_id = %s", (market_id,))
+                rows = cur.fetchall()
+                return [self._row_to_position(row) for row in rows]
+        finally:
+            conn.close()
     
     def update_position(self, market_id: str, user_id: str, 
                         outcome: Outcome, shares_delta: float, invested_delta: float):
-        if market_id not in self.positions:
-            self.positions[market_id] = {}
+        if self._use_memory:
+            if market_id not in self._positions:
+                self._positions[market_id] = {}
+            
+            if user_id not in self._positions[market_id]:
+                self._positions[market_id][user_id] = {
+                    "user_id": user_id,
+                    "market_id": market_id,
+                    "yes_shares": 0.0,
+                    "no_shares": 0.0,
+                    "total_invested": 0.0,
+                }
+            
+            pos = self._positions[market_id][user_id]
+            if outcome == Outcome.YES:
+                pos["yes_shares"] += shares_delta
+            else:
+                pos["no_shares"] += shares_delta
+            pos["total_invested"] += invested_delta
+            return
         
-        if user_id not in self.positions[market_id]:
-            self.positions[market_id][user_id] = {
-                "user_id": user_id,
-                "market_id": market_id,
-                "yes_shares": 0.0,
-                "no_shares": 0.0,
-                "total_invested": 0.0,
-            }
-        
-        pos = self.positions[market_id][user_id]
-        if outcome == Outcome.YES:
-            pos["yes_shares"] += shares_delta
-        else:
-            pos["no_shares"] += shares_delta
-        pos["total_invested"] += invested_delta
-        self._save()
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                # Upsert position
+                if outcome == Outcome.YES:
+                    cur.execute("""
+                        INSERT INTO positions (market_id, user_id, yes_shares, no_shares, total_invested)
+                        VALUES (%s, %s, %s, 0, %s)
+                        ON CONFLICT (market_id, user_id) DO UPDATE
+                        SET yes_shares = positions.yes_shares + %s, total_invested = positions.total_invested + %s
+                    """, (market_id, user_id, shares_delta, invested_delta, shares_delta, invested_delta))
+                else:
+                    cur.execute("""
+                        INSERT INTO positions (market_id, user_id, yes_shares, no_shares, total_invested)
+                        VALUES (%s, %s, 0, %s, %s)
+                        ON CONFLICT (market_id, user_id) DO UPDATE
+                        SET no_shares = positions.no_shares + %s, total_invested = positions.total_invested + %s
+                    """, (market_id, user_id, shares_delta, invested_delta, shares_delta, invested_delta))
+                conn.commit()
+        finally:
+            conn.close()
+    
+    # --- Utility ---
+    
+    def _save(self):
+        """No-op for PostgreSQL (kept for compatibility)."""
+        pass
 
 
 # Global storage instance
@@ -340,12 +741,13 @@ async def get_current_user(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: seed demo data if empty
-    if not db.users:
+    if not db.get_user("demo-user"):
         db.create_user("demo-user", "demo_user", balance=10000.0)
-    print(f"MoltMarkets API started with {len(db.markets)} markets, {len(db.users)} users")
+    market_count = len(db.list_markets())
+    user_count = len(db.users)
+    print(f"MoltMarkets API started with {market_count} markets, {user_count} users")
     yield
-    # Shutdown: ensure final save
-    db._save()
+    # Shutdown
     print("MoltMarkets API shutting down")
 
 
@@ -465,7 +867,7 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
         if winning_shares > 0:
             payout = winning_shares  # Each winning share pays $1
             db.update_user_balance(pos["user_id"], payout)
-            db.users[pos["user_id"]]["profit_all_time"] += payout - pos["total_invested"]
+            db.update_user_profit(pos["user_id"], payout - pos["total_invested"])
     
     market = db.get_market(market_id)
     return MarketDetail(
@@ -585,7 +987,7 @@ async def get_market_history(market_id: str):
     
     # Get all bets for this market, sorted by time
     market_bets = sorted(
-        [b for b in db.bets.values() if b["market_id"] == market_id],
+        db.get_bets_for_market(market_id),
         key=lambda x: x["created_at"]
     )
     
@@ -619,7 +1021,7 @@ async def get_market_bets(market_id: str):
         raise HTTPException(status_code=404, detail="Market not found")
     
     market_bets = sorted(
-        [b for b in db.bets.values() if b["market_id"] == market_id],
+        db.get_bets_for_market(market_id),
         key=lambda x: x["created_at"],
         reverse=True  # Most recent first
     )
@@ -708,8 +1110,8 @@ async def register_agent(req: AgentRegister):
     
     # Update display name if provided
     if req.display_name:
+        db.update_user_display_name(user_id, req.display_name)
         user["display_name"] = req.display_name
-        db._save()
     
     return AgentRegistered(
         user_id=user["id"],
@@ -745,22 +1147,25 @@ async def reset_api_key(user: dict = Depends(get_current_user)):
 async def get_leaderboard():
     """Get leaderboard sorted by profit."""
     entries = []
+    all_users = db.users
+    all_bets = db.bets
+    all_markets = db.markets
     
-    for user in db.users.values():
+    for user in all_users.values():
         # Calculate total volume from bets
         total_volume = sum(
             bet["amount"] 
-            for bet in db.bets.values() 
+            for bet in all_bets.values() 
             if bet["user_id"] == user["id"]
         )
         
         # Calculate win rate (simplified: resolved bets where user had winning position)
-        user_bets = [b for b in db.bets.values() if b["user_id"] == user["id"]]
+        user_bets = [b for b in all_bets.values() if b["user_id"] == user["id"]]
         wins = 0
         resolved_bets = 0
         
         for bet in user_bets:
-            market = db.get_market(bet["market_id"])
+            market = all_markets.get(bet["market_id"])
             if market and market["status"] == MarketStatus.RESOLVED:
                 resolved_bets += 1
                 if market["resolution"] == bet["outcome"]:
@@ -787,7 +1192,9 @@ async def get_leaderboard():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "markets": len(db.markets), "users": len(db.users)}
+    market_count = len(db.list_markets())
+    user_count = len(db.users)
+    return {"status": "ok", "markets": market_count, "users": user_count}
 
 
 # =============================================================================
