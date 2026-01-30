@@ -31,8 +31,10 @@ from models import (
     AgentRegister, AgentRegistered, AgentRegisteredWithClaim, AgentKeyReset,
     ClaimPageInfo, ClaimRequest, ClaimResponse, AgentStatus,
     CommentCreate, Comment, MarketComments,
+    ResolutionRequest, ResolutionResult, ResolutionVote,
     MarketStatus, Outcome,
 )
+from resolver import resolve_market, get_resolution_summary
 import random
 import re
 
@@ -278,7 +280,21 @@ class Storage:
                     )
                 """)
                 
+                # Resolution votes table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS resolution_votes (
+                        id VARCHAR(255) PRIMARY KEY,
+                        market_id VARCHAR(255) REFERENCES markets(id),
+                        agent_id VARCHAR(255) NOT NULL,
+                        vote VARCHAR(10) NOT NULL,
+                        reasoning TEXT,
+                        sources TEXT,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                
                 # Create indexes for common queries
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_resolution_votes_market ON resolution_votes(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_comments_market ON comments(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_market ON bets(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_user ON bets(user_id)")
@@ -941,6 +957,63 @@ class Storage:
         finally:
             conn.close()
     
+    # --- Resolution Votes ---
+    
+    def save_resolution_votes(self, market_id: str, votes: List[dict]):
+        """Save resolution votes for a market."""
+        if self._use_memory:
+            if not hasattr(self, '_resolution_votes'):
+                self._resolution_votes = {}
+            self._resolution_votes[market_id] = votes
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                for vote in votes:
+                    vote_id = str(uuid.uuid4())
+                    cur.execute("""
+                        INSERT INTO resolution_votes (id, market_id, agent_id, vote, reasoning, sources, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        vote_id,
+                        market_id,
+                        vote["agent_id"],
+                        vote["vote"],
+                        vote["reasoning"],
+                        json.dumps(vote.get("sources", [])),
+                        vote["created_at"],
+                    ))
+                conn.commit()
+        finally:
+            conn.close()
+    
+    def get_resolution_votes(self, market_id: str) -> List[dict]:
+        """Get all resolution votes for a market."""
+        if self._use_memory:
+            if not hasattr(self, '_resolution_votes'):
+                return []
+            return self._resolution_votes.get(market_id, [])
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT * FROM resolution_votes
+                    WHERE market_id = %s
+                    ORDER BY created_at ASC
+                """, (market_id,))
+                rows = cur.fetchall()
+                return [
+                    {
+                        **dict(row),
+                        "sources": json.loads(row["sources"]) if row["sources"] else []
+                    }
+                    for row in rows
+                ]
+        finally:
+            conn.close()
+    
     # --- Utility ---
     
     def _save(self):
@@ -1491,6 +1564,147 @@ async def create_comment(market_id: str, req: CommentCreate, user: dict = Depend
         created_at=comment["created_at"],
         parent_id=comment.get("parent_id"),
         replies=[],
+    )
+
+
+# =============================================================================
+# Resolution Committee Endpoints
+# =============================================================================
+
+@app.post("/markets/{market_id}/request-resolution", response_model=ResolutionResult)
+async def request_resolution(market_id: str, user: dict = Depends(get_current_user)):
+    """
+    Trigger the 9-agent resolution committee to vote on market resolution.
+    
+    Only the market creator can request resolution.
+    The committee will research and vote, with majority (5+) deciding the outcome.
+    """
+    market = db.get_market(market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    
+    # Only creator can request resolution
+    if market["creator_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Only market creator can request resolution")
+    
+    if market["status"] == MarketStatus.RESOLVED:
+        raise HTTPException(status_code=400, detail="Market already resolved")
+    
+    # Get API keys from environment
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    brave_key = os.getenv("BRAVE_API_KEY")
+    
+    if not anthropic_key or not brave_key:
+        raise HTTPException(status_code=500, detail="Resolution service not configured")
+    
+    # Run the resolution committee
+    status, outcome, votes = await resolve_market(
+        market_id=market_id,
+        market_title=market["title"],
+        market_description=market.get("description", ""),
+        resolution_criteria=market.get("description", ""),  # Use description as criteria
+        anthropic_key=anthropic_key,
+        brave_key=brave_key,
+    )
+    
+    # Save votes
+    vote_dicts = [
+        {
+            "agent_id": v.agent_id,
+            "vote": v.vote,
+            "reasoning": v.reasoning,
+            "sources": v.sources,
+            "created_at": v.created_at.isoformat(),
+        }
+        for v in votes
+    ]
+    db.save_resolution_votes(market_id, vote_dicts)
+    
+    # If resolved, update the market
+    resolved_at = None
+    if status == "resolved" and outcome:
+        outcome_enum = Outcome.YES if outcome == "YES" else Outcome.NO
+        db.resolve_market(market_id, outcome_enum)
+        
+        # Payout positions
+        for pos in db.get_market_positions(market_id):
+            winning_shares = pos["yes_shares"] if outcome == "YES" else pos["no_shares"]
+            if winning_shares > 0:
+                payout = winning_shares
+                db.update_user_balance(pos["user_id"], payout)
+                db.update_user_profit(pos["user_id"], payout - pos["total_invested"])
+        
+        resolved_at = datetime.now(timezone.utc)
+    
+    # Build response
+    return ResolutionResult(
+        market_id=market_id,
+        status=status,
+        outcome=Outcome(outcome) if outcome else None,
+        votes_yes=sum(1 for v in votes if v.vote == "YES"),
+        votes_no=sum(1 for v in votes if v.vote == "NO"),
+        total_votes=len(votes),
+        votes=[
+            ResolutionVote(
+                agent_id=v.agent_id,
+                vote=Outcome(v.vote),
+                reasoning=v.reasoning,
+                sources=v.sources,
+                created_at=v.created_at,
+            )
+            for v in votes
+        ],
+        resolved_at=resolved_at,
+    )
+
+
+@app.get("/markets/{market_id}/resolution-votes", response_model=ResolutionResult)
+async def get_resolution_votes(market_id: str):
+    """Get the resolution committee votes for a market."""
+    market = db.get_market(market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    
+    votes = db.get_resolution_votes(market_id)
+    
+    if not votes:
+        raise HTTPException(status_code=404, detail="No resolution votes found for this market")
+    
+    yes_votes = sum(1 for v in votes if v["vote"] == "YES")
+    no_votes = sum(1 for v in votes if v["vote"] == "NO")
+    
+    # Determine status
+    if market["status"] == MarketStatus.RESOLVED:
+        status = "resolved"
+        outcome = market["resolution"]
+    elif yes_votes >= 5:
+        status = "resolved"
+        outcome = Outcome.YES
+    elif no_votes >= 5:
+        status = "resolved"
+        outcome = Outcome.NO
+    else:
+        status = "disputed"
+        outcome = None
+    
+    return ResolutionResult(
+        market_id=market_id,
+        status=status,
+        outcome=outcome,
+        votes_yes=yes_votes,
+        votes_no=no_votes,
+        total_votes=len(votes),
+        votes=[
+            ResolutionVote(
+                agent_id=v["agent_id"],
+                vote=Outcome(v["vote"]),
+                reasoning=v["reasoning"],
+                sources=v.get("sources", []),
+                created_at=datetime.fromisoformat(v["created_at"]) if isinstance(v["created_at"], str) else v["created_at"],
+            )
+            for v in votes
+        ],
+        resolved_at=market.get("resolved_at"),
     )
 
 
