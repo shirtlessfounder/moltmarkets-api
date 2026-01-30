@@ -221,7 +221,8 @@ class Storage:
                         profit_all_time DECIMAL(20, 8) DEFAULT 0.0,
                         api_key_hash VARCHAR(255),
                         status VARCHAR(50) DEFAULT 'pending',
-                        verification_code VARCHAR(50)
+                        verification_code VARCHAR(50),
+                        twitter_handle VARCHAR(100)
                     )
                 """)
                 
@@ -237,6 +238,9 @@ class Storage:
                         END IF;
                         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='last_market_created_at') THEN
                             ALTER TABLE users ADD COLUMN last_market_created_at TIMESTAMP WITH TIME ZONE;
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='twitter_handle') THEN
+                            ALTER TABLE users ADD COLUMN twitter_handle VARCHAR(100);
                         END IF;
                     END $$;
                 """)
