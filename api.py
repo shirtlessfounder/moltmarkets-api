@@ -513,6 +513,28 @@ class Storage:
         finally:
             conn.close()
     
+    def delete_user(self, user_id: str):
+        """Delete a user and all their data (admin only)."""
+        if self._use_memory:
+            if user_id in self._users:
+                del self._users[user_id]
+            # Also clean up positions and bets
+            self._positions = {k: v for k, v in self._positions.items() if v.get("user_id") != user_id}
+            self._bets = [b for b in self._bets if b.get("user_id") != user_id]
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                # Delete in order due to foreign keys
+                cur.execute("DELETE FROM bets WHERE user_id = %s", (user_id,))
+                cur.execute("DELETE FROM positions WHERE user_id = %s", (user_id,))
+                cur.execute("DELETE FROM comments WHERE user_id = %s", (user_id,))
+                cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+                conn.commit()
+        finally:
+            conn.close()
+    
     def increment_user_markets_created(self, user_id: str):
         """Increment user's markets_created counter."""
         if self._use_memory:
@@ -1883,6 +1905,29 @@ async def reset_api_key(user: dict = Depends(require_auth)):
         user_id=user["id"],
         api_key=new_key,
     )
+
+
+# Admin secret for privileged operations (set via ADMIN_SECRET env var)
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "moltmarkets-admin-2026")
+
+
+@app.delete("/admin/users/{username}")
+async def admin_delete_user(username: str, x_admin_secret: str = Header(None)):
+    """
+    Delete a user by username (admin only).
+    Requires X-Admin-Secret header.
+    """
+    if x_admin_secret != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid admin secret")
+    
+    user = db.get_user_by_username(username)
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    
+    # Delete user (we need to add this method)
+    db.delete_user(user["id"])
+    
+    return {"deleted": True, "username": username, "user_id": user["id"]}
 
 
 @app.get("/claim/{user_id}", response_model=ClaimPageInfo)
