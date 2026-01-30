@@ -17,7 +17,7 @@ from cpmm import CpmmState, calculate_cpmm_purchase, get_cpmm_probability, Outco
 from models import (
     MarketCreate, MarketResolve, MarketSummary, MarketDetail,
     BetRequest, BetResponse, Position, MarketPositions,
-    UserProfile, UserMe, ErrorResponse,
+    UserProfile, UserMe, ErrorResponse, LeaderboardEntry,
     MarketStatus, Outcome,
 )
 
@@ -457,6 +457,50 @@ async def get_user(user_id: str):
         total_bets=user["total_bets"],
         profit_all_time=user["profit_all_time"],
     )
+
+
+# =============================================================================
+# Leaderboard
+# =============================================================================
+
+@app.get("/leaderboard", response_model=List[LeaderboardEntry])
+async def get_leaderboard():
+    """Get leaderboard sorted by profit."""
+    entries = []
+    
+    for user in db.users.values():
+        # Calculate total volume from bets
+        total_volume = sum(
+            bet["amount"] 
+            for bet in db.bets.values() 
+            if bet["user_id"] == user["id"]
+        )
+        
+        # Calculate win rate (simplified: resolved bets where user had winning position)
+        user_bets = [b for b in db.bets.values() if b["user_id"] == user["id"]]
+        wins = 0
+        resolved_bets = 0
+        
+        for bet in user_bets:
+            market = db.get_market(bet["market_id"])
+            if market and market["status"] == MarketStatus.RESOLVED:
+                resolved_bets += 1
+                if market["resolution"] == bet["outcome"]:
+                    wins += 1
+        
+        win_rate = wins / resolved_bets if resolved_bets > 0 else 0.5
+        
+        entries.append(LeaderboardEntry(
+            user_id=user["id"],
+            username=user["username"],
+            pnl=user["profit_all_time"],
+            total_volume=total_volume,
+            win_rate=win_rate,
+        ))
+    
+    # Sort by PNL descending
+    entries.sort(key=lambda x: x.pnl, reverse=True)
+    return entries[:50]  # Top 50
 
 
 # =============================================================================

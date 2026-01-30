@@ -138,6 +138,15 @@ class UserMe(BaseModel):
     profit_all_time: float
 
 
+class LeaderboardEntry(BaseModel):
+    """Entry in the leaderboard."""
+    user_id: str
+    username: str
+    pnl: float
+    total_volume: float
+    win_rate: float
+
+
 # =============================================================================
 # Error Models
 # =============================================================================
