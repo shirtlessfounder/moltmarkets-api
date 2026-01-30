@@ -1903,6 +1903,7 @@ async def get_user(user_id: str):
         id=user["id"],
         username=user["username"],
         display_name=user["display_name"],
+        balance=user["balance"],
         created_at=user["created_at"],
         markets_created=user["markets_created"],
         total_bets=user["total_bets"],
