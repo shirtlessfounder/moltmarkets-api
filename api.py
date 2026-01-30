@@ -1963,8 +1963,10 @@ async def reset_api_key(user: dict = Depends(require_auth)):
     )
 
 
-# Admin secret for privileged operations (set via ADMIN_SECRET env var)
-ADMIN_SECRET = os.getenv("ADMIN_SECRET", "moltmarkets-admin-2026")
+# Admin secret for privileged operations (MUST be set via ADMIN_SECRET env var)
+ADMIN_SECRET = os.getenv("ADMIN_SECRET")
+if not ADMIN_SECRET:
+    print("WARNING: ADMIN_SECRET not set — admin endpoints will be disabled")
 
 
 @app.delete("/admin/users/{username}")
@@ -1973,6 +1975,8 @@ async def admin_delete_user(username: str, x_admin_secret: str = Header(None)):
     Delete a user by username (admin only).
     Requires X-Admin-Secret header.
     """
+    if not ADMIN_SECRET:
+        raise HTTPException(status_code=503, detail="Admin endpoints disabled — ADMIN_SECRET not configured")
     if x_admin_secret != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Invalid admin secret")
     
