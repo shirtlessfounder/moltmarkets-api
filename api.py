@@ -8,7 +8,7 @@ Uses PostgreSQL for persistence.
 import os
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, unquote
@@ -41,6 +41,17 @@ import re
 # =============================================================================
 
 VERIFICATION_WORDS = ["crab", "shell", "reef", "wave", "tide", "coral", "kelp", "pearl", "anchor", "lobster"]
+
+
+# =============================================================================
+# Economics Constants
+# =============================================================================
+
+TRADE_FEE_RATE = 0.02  # 2% total fee
+CREATOR_FEE_SHARE = 0.5  # 50% of fee goes to market creator (1%)
+# Remaining 50% (1%) is burned (not allocated to anyone)
+
+MARKET_CREATION_COOLDOWN_MINUTES = 30  # Rate limit for market creation
 
 
 def generate_verification_code() -> str:
@@ -201,6 +212,9 @@ class Storage:
                         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='verification_code') THEN
                             ALTER TABLE users ADD COLUMN verification_code VARCHAR(50);
                         END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='last_market_created_at') THEN
+                            ALTER TABLE users ADD COLUMN last_market_created_at TIMESTAMP WITH TIME ZONE;
+                        END IF;
                     END $$;
                 """)
                 
@@ -279,6 +293,7 @@ class Storage:
             "api_key_hash": row["api_key_hash"],
             "status": row.get("status", "pending"),
             "verification_code": row.get("verification_code"),
+            "last_market_created_at": row.get("last_market_created_at"),
         }
     
     def _row_to_market(self, row: dict) -> dict:
@@ -511,6 +526,24 @@ class Storage:
         try:
             with conn.cursor() as cur:
                 cur.execute("UPDATE users SET status = %s WHERE id = %s", (status, user_id))
+                conn.commit()
+        finally:
+            conn.close()
+    
+    def update_user_last_market_created(self, user_id: str):
+        """Update timestamp when user last created a market (for rate limiting)."""
+        now = datetime.now(timezone.utc)
+        if self._use_memory:
+            self._users[user_id]["last_market_created_at"] = now
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET last_market_created_at = %s WHERE id = %s",
+                    (now, user_id)
+                )
                 conn.commit()
         finally:
             conn.close()
@@ -949,6 +982,21 @@ async def create_market(req: MarketCreate, user: dict = Depends(get_current_user
     if req.closes_at <= datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="closes_at must be in the future")
     
+    # Rate limit check: 1 market per MARKET_CREATION_COOLDOWN_MINUTES
+    last_created = user.get("last_market_created_at")
+    if last_created:
+        # Handle both datetime objects and strings
+        if isinstance(last_created, str):
+            last_created = datetime.fromisoformat(last_created.replace('Z', '+00:00'))
+        cooldown_end = last_created + timedelta(minutes=MARKET_CREATION_COOLDOWN_MINUTES)
+        now = datetime.now(timezone.utc)
+        if now < cooldown_end:
+            remaining = (cooldown_end - now).total_seconds() / 60
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit: you can create another market in {remaining:.0f} minutes"
+            )
+    
     market_id = str(uuid.uuid4())
     market = db.create_market(
         market_id=market_id,
@@ -958,6 +1006,9 @@ async def create_market(req: MarketCreate, user: dict = Depends(get_current_user
         closes_at=req.closes_at,
         initial_liquidity=req.initial_liquidity,
     )
+    
+    # Update last market creation timestamp
+    db.update_user_last_market_created(user["id"])
     
     return MarketDetail(
         id=market["id"],
@@ -1034,8 +1085,15 @@ async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(get_cu
     if market["closes_at"] <= datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="Market has closed")
     
-    if user["balance"] < req.amount:
-        raise HTTPException(status_code=400, detail="Insufficient balance")
+    # Calculate trade fee (2% total)
+    trade_fee = req.amount * TRADE_FEE_RATE
+    total_cost = req.amount + trade_fee
+    
+    if user["balance"] < total_cost:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Insufficient balance. Need {total_cost:.2f} (bet: {req.amount:.2f} + fee: {trade_fee:.2f})"
+        )
     
     # Calculate bet using CPMM
     prob_before = get_cpmm_probability(market["pool"], market["p"])
@@ -1049,8 +1107,15 @@ async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(get_cu
     
     prob_after = get_cpmm_probability(result["new_pool"], result["new_p"])
     
-    # Execute trade
-    db.update_user_balance(user["id"], -req.amount)
+    # Execute trade - deduct bet amount + fee from user
+    db.update_user_balance(user["id"], -total_cost)
+    
+    # Pay creator their share of the fee (1%)
+    creator_fee = trade_fee * CREATOR_FEE_SHARE
+    if market["creator_id"] != user["id"]:  # Don't pay yourself
+        db.update_user_balance(market["creator_id"], creator_fee)
+    # Note: remaining fee (1%) is burned - not allocated to anyone
+    
     db.update_market_pool(market_id, result["new_pool"], result["new_p"], req.amount)
     db.update_position(market_id, user["id"], req.outcome, shares, req.amount)
     
