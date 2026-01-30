@@ -192,6 +192,7 @@ class UserProfile(BaseModel):
     id: str
     username: str
     display_name: str
+    balance: float  # Current balance in points
     created_at: datetime
     markets_created: int
     total_bets: int
