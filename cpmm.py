@@ -198,6 +198,118 @@ def calculate_cpmm_shares(
         return n + bet_amount - (k * (bet_amount + y) ** (-p)) ** (1 / (1 - p))
 
 
+def calculate_cpmm_sale_amount(
+    pool: Pool,
+    p: float,
+    shares: float,
+    outcome: Outcome
+) -> float:
+    """
+    Calculate money received when selling shares back to the pool.
+    
+    When you sell s YES shares:
+    - Your s shares go back into the pool: y increases by s
+    - You withdraw money: both y and n decrease by the payout amount
+    - New pool: [y + s - a, n - a]
+    - Must maintain: (y + s - a)^p * (n - a)^(1-p) = k
+    
+    Solving for a (the payout):
+    Using binary search to find the amount that maintains the invariant.
+    
+    Args:
+        pool: Current pool state
+        p: Pool weight parameter
+        shares: Number of shares to sell
+        outcome: 'YES' or 'NO'
+        
+    Returns:
+        Amount received for selling shares
+    """
+    if shares <= 0:
+        return 0.0
+    
+    y = pool["YES"]
+    n = pool["NO"]
+    k = (y ** p) * (n ** (1 - p))
+    
+    # Binary search for the payout amount
+    # Maximum possible payout is the smaller of the two pool sides
+    low = 0.0
+    high = min(y, n) * 0.99  # Can't drain the pool completely
+    
+    for _ in range(100):  # Binary search iterations
+        mid = (low + high) / 2
+        
+        if outcome == "YES":
+            new_y = y + shares - mid
+            new_n = n - mid
+        else:
+            new_y = y - mid
+            new_n = n + shares - mid
+        
+        if new_y <= 0 or new_n <= 0:
+            high = mid
+            continue
+            
+        new_k = (new_y ** p) * (new_n ** (1 - p))
+        
+        if abs(new_k - k) < 0.0001:
+            return mid
+        elif new_k > k:
+            low = mid
+        else:
+            high = mid
+    
+    return mid
+
+
+class SaleResult(TypedDict):
+    """Result of a CPMM sale calculation."""
+    amount: float
+    new_pool: Pool
+    new_p: float
+
+
+def calculate_cpmm_sale(
+    state: CpmmState,
+    shares: float,
+    outcome: Outcome
+) -> SaleResult:
+    """
+    Calculate the full result of selling shares back to the pool.
+    
+    Args:
+        state: Current CPMM state
+        shares: Number of shares to sell
+        outcome: 'YES' or 'NO'
+        
+    Returns:
+        SaleResult with amount received, new_pool, and new_p
+    """
+    pool = state.pool
+    p = state.p
+    
+    amount = calculate_cpmm_sale_amount(pool, p, shares, outcome)
+    
+    y = pool["YES"]
+    n = pool["NO"]
+    
+    if outcome == "YES":
+        new_y = y + shares - amount
+        new_n = n - amount
+    else:
+        new_y = y - amount
+        new_n = n + shares - amount
+    
+    new_pool = {"YES": new_y, "NO": new_n}
+    
+    return {
+        "amount": amount,
+        "new_pool": new_pool,
+        "new_p": p,  # p doesn't change on sale
+    }
+
+
 def get_cpmm_fees(
     state: CpmmState,
     bet_amount: float,
