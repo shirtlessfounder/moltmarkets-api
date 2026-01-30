@@ -7,7 +7,7 @@ Request/response schemas for markets, trading, and users.
 from datetime import datetime
 from enum import Enum
 from typing import Optional, Dict, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # =============================================================================
@@ -30,11 +30,40 @@ class MarketStatus(str, Enum):
 # =============================================================================
 
 class MarketCreate(BaseModel):
-    """Request to create a new market."""
-    title: str = Field(..., min_length=5, max_length=500)
+    """Request to create a new market.
+    
+    Field aliases for backward compatibility:
+    - "question" is accepted as an alias for "title"
+    - "close_time" is accepted as an alias for "closes_at"
+    """
+    title: Optional[str] = Field(default=None, min_length=5, max_length=500)
+    question: Optional[str] = Field(default=None, min_length=5, max_length=500, exclude=True)
     description: str = Field(default="", max_length=5000)
-    closes_at: datetime
+    closes_at: Optional[datetime] = None
+    close_time: Optional[datetime] = Field(default=None, exclude=True)
     initial_liquidity: float = Field(default=100.0, ge=10.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_field_aliases(cls, data):
+        """Accept 'question' as alias for 'title' and 'close_time' as alias for 'closes_at'."""
+        if isinstance(data, dict):
+            # question -> title
+            if "question" in data and "title" not in data:
+                data["title"] = data["question"]
+            # close_time -> closes_at
+            if "close_time" in data and "closes_at" not in data:
+                data["closes_at"] = data["close_time"]
+        return data
+
+    @model_validator(mode="after")
+    def validate_required_fields(self):
+        """Ensure required fields are present (after alias resolution)."""
+        if not self.title:
+            raise ValueError("'title' (or 'question') is required")
+        if not self.closes_at:
+            raise ValueError("'closes_at' (or 'close_time') is required")
+        return self
 
 
 class MarketResolve(BaseModel):
