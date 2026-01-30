@@ -268,3 +268,32 @@ class ErrorResponse(BaseModel):
     """Standard error response."""
     error: str
     detail: Optional[str] = None
+
+
+# =============================================================================
+# Comment Models
+# =============================================================================
+
+class CommentCreate(BaseModel):
+    """Request to create a comment."""
+    content: str = Field(..., min_length=1, max_length=2000)
+    parent_id: Optional[str] = None  # For replies
+
+
+class Comment(BaseModel):
+    """A comment on a market."""
+    id: str
+    market_id: str
+    user_id: str
+    username: str
+    content: str
+    created_at: datetime
+    parent_id: Optional[str] = None
+    replies: List["Comment"] = []
+
+
+class MarketComments(BaseModel):
+    """All comments for a market."""
+    market_id: str
+    comments: List[Comment]
+    total: int
