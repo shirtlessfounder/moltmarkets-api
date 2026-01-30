@@ -201,7 +201,12 @@ class Storage:
             self._positions: Dict[str, Dict[str, dict]] = {}
     
     def _init_pool(self):
-        """Initialize the connection pool."""
+        """Initialize the connection pool.
+        
+        Configures TCP keepalives so Railway's Postgres proxy doesn't silently
+        drop idle connections, and sets a statement timeout as a safety net
+        against queries that hang forever.
+        """
         parsed = urlparse(self.database_url)
         self._pool = pool.SimpleConnectionPool(
             minconn=1,
@@ -211,16 +216,58 @@ class Storage:
             user=parsed.username,
             password=unquote(parsed.password) if parsed.password else None,
             dbname=parsed.path.lstrip('/'),
-            cursor_factory=RealDictCursor
+            cursor_factory=RealDictCursor,
+            connect_timeout=10,          # Don't wait forever to connect
+            keepalives=1,                # Enable TCP keepalives
+            keepalives_idle=30,          # Send keepalive after 30s idle
+            keepalives_interval=10,      # Retry keepalive every 10s
+            keepalives_count=3,          # Give up after 3 missed keepalives
+            options='-c statement_timeout=30000',  # 30s query timeout
         )
-        print("Connection pool initialized (min=1, max=10)")
+        print("Connection pool initialized (min=1, max=10, keepalives=on, statement_timeout=30s)")
     
     def _get_conn(self):
-        """Get a database connection from the pool."""
-        return self._pool.getconn()
+        """Get a database connection from the pool.
+        
+        Validates the connection is alive before returning it.  If the
+        connection is dead (e.g., closed by Railway's proxy), it is discarded
+        and a fresh one is created.
+        """
+        conn = self._pool.getconn()
+        try:
+            # Quick health check — if the connection was silently closed
+            # by the proxy/firewall, this will raise an exception.
+            conn.isolation_level  # Triggers a round-trip if connection is bad
+            if conn.closed:
+                raise psycopg2.OperationalError("connection is closed")
+            # Run a trivial query to truly verify the connection is live
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        except Exception:
+            # Connection is dead — discard it and get a fresh one
+            try:
+                self._pool.putconn(conn, close=True)
+            except Exception:
+                pass
+            conn = self._pool.getconn()
+        return conn
     
     def _put_conn(self, conn):
-        """Return a connection to the pool."""
+        """Return a connection to the pool.
+        
+        Always rolls back any uncommitted transaction first so the next
+        user of this connection doesn't inherit a broken transaction state
+        (InFailedSqlTransaction).
+        """
+        try:
+            conn.rollback()  # Clean slate — no stale transaction state
+        except Exception:
+            # Connection is broken beyond repair — close instead of returning
+            try:
+                self._pool.putconn(conn, close=True)
+            except Exception:
+                pass
+            return
         self._pool.putconn(conn)
     
     def _init_db(self):
