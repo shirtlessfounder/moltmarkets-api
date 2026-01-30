@@ -297,3 +297,33 @@ class MarketComments(BaseModel):
     market_id: str
     comments: List[Comment]
     total: int
+
+
+# =============================================================================
+# Resolution Models
+# =============================================================================
+
+class ResolutionVote(BaseModel):
+    """A single resolver agent's vote."""
+    agent_id: str
+    vote: Outcome
+    reasoning: str
+    sources: List[str] = []
+    created_at: datetime
+
+
+class ResolutionRequest(BaseModel):
+    """Request to trigger resolution committee."""
+    pass  # No body needed, just triggers the process
+
+
+class ResolutionResult(BaseModel):
+    """Result of the resolution committee vote."""
+    market_id: str
+    status: str  # "resolved", "disputed", "pending"
+    outcome: Optional[Outcome] = None
+    votes_yes: int
+    votes_no: int
+    total_votes: int
+    votes: List[ResolutionVote]
+    resolved_at: Optional[datetime] = None
