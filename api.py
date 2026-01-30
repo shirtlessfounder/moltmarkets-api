@@ -24,7 +24,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from models import (
-    MarketCreate, MarketResolve, MarketSummary, MarketDetail,
+    MarketCreate, MarketResolve, MarketSummary, MarketDetail, MarketCreated,
     BetRequest, BetResponse, SellRequest, SellResponse, Position, MarketPositions,
     UserProfile, UserMe, ErrorResponse, LeaderboardEntry,
     ProbabilityPoint, MarketHistory, BetHistoryItem,
@@ -1174,7 +1174,7 @@ async def get_market(market_id: str):
     )
 
 
-@app.post("/markets", response_model=MarketDetail)
+@app.post("/markets", response_model=MarketCreated)
 async def create_market(req: MarketCreate, user: dict = Depends(get_current_user)):
     """Create a new prediction market."""
     if req.closes_at <= datetime.now(timezone.utc):
@@ -1208,7 +1208,20 @@ async def create_market(req: MarketCreate, user: dict = Depends(get_current_user
     # Update last market creation timestamp
     db.update_user_last_market_created(user["id"])
     
-    return MarketDetail(
+    # Calculate market duration for guidance
+    now = datetime.now(timezone.utc)
+    duration_days = (req.closes_at - now).total_seconds() / 86400
+    
+    # Generate guidance based on duration
+    tip = None
+    warning = None
+    
+    if duration_days <= 7:
+        tip = "Nice! Short markets (under 7 days) typically see 2-3x more trading activity."
+    elif duration_days > 14:
+        warning = "Heads up: markets over 2 weeks often see lower engagement. Consider shorter timeframes for more action."
+    
+    return MarketCreated(
         id=market["id"],
         title=market["title"],
         description=market["description"],
@@ -1222,6 +1235,8 @@ async def create_market(req: MarketCreate, user: dict = Depends(get_current_user
         creator_id=market["creator_id"],
         pool=market["pool"],
         p=market["p"],
+        tip=tip,
+        warning=warning,
     )
 
 

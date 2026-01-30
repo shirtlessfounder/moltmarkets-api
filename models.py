@@ -70,6 +70,25 @@ class MarketDetail(BaseModel):
     p: float  # CPMM p parameter
 
 
+class MarketCreated(BaseModel):
+    """Response after creating a market (includes guidance tips)."""
+    id: str
+    title: str
+    description: str
+    probability: float
+    status: MarketStatus
+    closes_at: datetime
+    created_at: datetime
+    resolved_at: Optional[datetime] = None
+    resolution: Optional[Outcome] = None
+    total_volume: float
+    creator_id: str
+    pool: Dict[str, float]
+    p: float
+    tip: Optional[str] = None  # Helpful guidance for market creators
+    warning: Optional[str] = None  # Soft warning (e.g., market too long)
+
+
 # =============================================================================
 # Trading Models
 # =============================================================================
