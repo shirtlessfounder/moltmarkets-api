@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-from cpmm import CpmmState, calculate_cpmm_purchase, get_cpmm_probability, Outcome as CpmmOutcome
+from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability, Outcome as CpmmOutcome
 import secrets
 import hashlib
 import psycopg2
@@ -25,7 +25,7 @@ from psycopg2.extras import RealDictCursor
 
 from models import (
     MarketCreate, MarketResolve, MarketSummary, MarketDetail,
-    BetRequest, BetResponse, Position, MarketPositions,
+    BetRequest, BetResponse, SellRequest, SellResponse, Position, MarketPositions,
     UserProfile, UserMe, ErrorResponse, LeaderboardEntry,
     ProbabilityPoint, MarketHistory, BetHistoryItem,
     AgentRegister, AgentRegistered, AgentRegisteredWithClaim, AgentKeyReset,
@@ -838,6 +838,37 @@ class Storage:
         finally:
             conn.close()
     
+    def reduce_position(self, market_id: str, user_id: str, 
+                        outcome: Outcome, shares: float):
+        """Reduce shares in a position (for selling)."""
+        if self._use_memory:
+            if market_id in self._positions and user_id in self._positions[market_id]:
+                pos = self._positions[market_id][user_id]
+                if outcome == Outcome.YES:
+                    pos["yes_shares"] = max(0, pos["yes_shares"] - shares)
+                else:
+                    pos["no_shares"] = max(0, pos["no_shares"] - shares)
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                if outcome == Outcome.YES:
+                    cur.execute("""
+                        UPDATE positions 
+                        SET yes_shares = GREATEST(0, yes_shares - %s)
+                        WHERE market_id = %s AND user_id = %s
+                    """, (shares, market_id, user_id))
+                else:
+                    cur.execute("""
+                        UPDATE positions 
+                        SET no_shares = GREATEST(0, no_shares - %s)
+                        WHERE market_id = %s AND user_id = %s
+                    """, (shares, market_id, user_id))
+                conn.commit()
+        finally:
+            conn.close()
+    
     # --- Utility ---
     
     def _save(self):
@@ -1142,6 +1173,79 @@ async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(get_cu
         probability_before=bet["probability_before"],
         probability_after=bet["probability_after"],
         created_at=bet["created_at"],
+    )
+
+
+@app.post("/markets/{market_id}/sell", response_model=SellResponse)
+async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(get_current_user)):
+    """Sell shares back to the market."""
+    market = db.get_market(market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    
+    if market["status"] != MarketStatus.OPEN:
+        raise HTTPException(status_code=400, detail="Market is not open for trading")
+    
+    if market["closes_at"] <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="Market has closed")
+    
+    # Get user's position
+    position = db.get_position(market_id, user["id"])
+    if not position:
+        raise HTTPException(status_code=400, detail="You have no position in this market")
+    
+    # Check if user has enough shares to sell
+    if req.outcome == Outcome.YES:
+        available_shares = position["yes_shares"]
+    else:
+        available_shares = position["no_shares"]
+    
+    if available_shares < req.shares:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient shares. You have {available_shares:.2f} {req.outcome.value} shares"
+        )
+    
+    # Calculate sale using CPMM
+    prob_before = get_cpmm_probability(market["pool"], market["p"])
+    
+    state = CpmmState(pool=market["pool"].copy(), p=market["p"])
+    result = calculate_cpmm_sale(state, req.shares, req.outcome.value)
+    
+    amount_before_fee = result["amount"]
+    if amount_before_fee <= 0:
+        raise HTTPException(status_code=400, detail="Sale would result in zero or negative payout")
+    
+    # Apply trade fee (2%)
+    trade_fee = amount_before_fee * TRADE_FEE_RATE
+    amount_after_fee = amount_before_fee - trade_fee
+    
+    prob_after = get_cpmm_probability(result["new_pool"], result["new_p"])
+    
+    # Execute sale
+    # Credit user with the payout (minus fee)
+    db.update_user_balance(user["id"], amount_after_fee)
+    
+    # Pay creator their share of the fee (1%)
+    creator_fee = trade_fee * CREATOR_FEE_SHARE
+    if market["creator_id"] != user["id"]:
+        db.update_user_balance(market["creator_id"], creator_fee)
+    
+    # Update market pool
+    db.update_market_pool(market_id, result["new_pool"], result["new_p"], 0)  # No volume added on sell
+    
+    # Update user's position (reduce shares)
+    db.reduce_position(market_id, user["id"], req.outcome, req.shares)
+    
+    return SellResponse(
+        market_id=market_id,
+        user_id=user["id"],
+        outcome=req.outcome,
+        shares_sold=req.shares,
+        amount_received=amount_after_fee,
+        fee_paid=trade_fee,
+        probability_before=prob_before,
+        probability_after=prob_after,
     )
 
 
