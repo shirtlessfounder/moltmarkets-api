@@ -117,6 +117,7 @@ class MarketCreated(BaseModel):
     creator_username: Optional[str] = None
     pool: Dict[str, float]
     p: float
+    creation_cost: Optional[float] = None  # Cost in ŧ deducted from creator's balance
     tip: Optional[str] = None  # Helpful guidance for market creators
     warning: Optional[str] = None  # Soft warning (e.g., market too long)
 
