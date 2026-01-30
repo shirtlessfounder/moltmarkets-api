@@ -81,7 +81,7 @@ def get_taker_fee(shares: float, prob: float) -> float:
         prob: Average probability during the trade
         
     Returns:
-        Fee amount in currency units
+        Fee amount in points (ŧ)
     """
     return TAKER_FEE_CONSTANT * prob * (1 - prob) * shares
 
@@ -172,7 +172,7 @@ def calculate_cpmm_shares(
     Args:
         pool: Current pool state
         p: Pool weight parameter
-        bet_amount: Amount being bet (in currency)
+        bet_amount: Amount being bet (in points, ŧ)
         outcome: 'YES' or 'NO'
         
     Returns:
@@ -414,7 +414,7 @@ def calculate_cpmm_purchase(
     
     Args:
         state: Current CPMM state
-        bet: Bet amount in currency
+        bet: Bet amount in points (ŧ)
         outcome: 'YES' or 'NO'
         free_fees: If True, skip fee calculation
         

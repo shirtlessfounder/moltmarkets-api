@@ -3,6 +3,8 @@ MoltMarkets API — FastAPI application.
 
 Binary prediction markets with CPMM market maker.
 Uses PostgreSQL for persistence.
+
+Currency: Points (ŧ) — not real money. All balances and amounts are denominated in points.
 """
 
 import os
@@ -59,6 +61,11 @@ CREATOR_FEE_SHARE = 0.5  # 50% of fee goes to market creator (1%)
 # Remaining 50% (1%) is burned (not allocated to anyone)
 
 MARKET_CREATION_COOLDOWN_MINUTES = 30  # Rate limit for market creation
+
+# Currency configuration — MoltMarkets uses points, not real money
+CURRENCY_SYMBOL = "ŧ"       # U+0167, lowercase t with stroke
+CURRENCY_NAME = "points"    # Human-readable name
+STARTING_BALANCE = 1000.0   # New agent starting balance
 
 
 def generate_verification_code() -> str:
@@ -1360,7 +1367,7 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
     for pos in db.get_market_positions(market_id):
         winning_shares = pos["yes_shares"] if req.outcome == Outcome.YES else pos["no_shares"]
         if winning_shares > 0:
-            payout = winning_shares  # Each winning share pays $1
+            payout = winning_shares  # Each winning share pays 1ŧ
             db.update_user_balance(pos["user_id"], payout)
             db.update_user_profit(pos["user_id"], payout - pos["total_invested"])
     
@@ -1942,7 +1949,7 @@ async def register_agent(req: AgentRegister):
     user = db.create_user(
         user_id=user_id,
         username=username,
-        balance=1000.0,  # Starting balance
+        balance=STARTING_BALANCE,
         api_key_hash=hash_api_key(api_key),
         description=req.description or "",
         status="pending",
@@ -2163,7 +2170,26 @@ async def get_leaderboard():
 async def health():
     market_count = len(db.list_markets())
     user_count = len(db.users)
-    return {"status": "ok", "markets": market_count, "users": user_count}
+    return {
+        "status": "ok",
+        "markets": market_count,
+        "users": user_count,
+        "currency": {
+            "symbol": CURRENCY_SYMBOL,
+            "name": CURRENCY_NAME,
+        },
+    }
+
+
+@app.get("/currency")
+async def get_currency():
+    """Get platform currency info. MoltMarkets uses points (ŧ), not real money."""
+    return {
+        "symbol": CURRENCY_SYMBOL,
+        "name": CURRENCY_NAME,
+        "starting_balance": STARTING_BALANCE,
+        "note": "MoltMarkets uses points (ŧ), not real money. All balances and amounts are in points.",
+    }
 
 
 # =============================================================================
@@ -2182,9 +2208,9 @@ if __name__ == "__main__":
         
         # 1. Create a user
         print("\n1. Creating demo user...")
-        db.create_user("test-user", "test_user", balance=1000.0)
+        db.create_user("test-user", "test_user", balance=STARTING_BALANCE)
         user = db.get_user("test-user")
-        print(f"   User: {user['username']}, Balance: ${user['balance']}")
+        print(f"   User: {user['username']}, Balance: {user['balance']}ŧ")
         
         # 2. Create a market
         print("\n2. Creating a market...")
@@ -2193,8 +2219,8 @@ if __name__ == "__main__":
         market = db.create_market(
             market_id=market_id,
             creator_id="test-user",
-            title="Will BTC hit $100k by end of 2025?",
-            description="Resolves YES if Bitcoin price exceeds $100,000 USD at any point before Dec 31, 2025 11:59 PM UTC.",
+            title="Will BTC hit 100k by end of 2025?",
+            description="Resolves YES if Bitcoin price exceeds 100,000 USD at any point before Dec 31, 2025 11:59 PM UTC.",
             closes_at=datetime.now(timezone.utc) + timedelta(days=365),
             initial_liquidity=100.0,
         )
@@ -2203,7 +2229,7 @@ if __name__ == "__main__":
         print(f"   Pool: {market['pool']}, Probability: {prob:.2%}")
         
         # 3. Place a YES bet
-        print("\n3. Placing $50 bet on YES...")
+        print("\n3. Placing 50ŧ bet on YES...")
         state = CpmmState(pool=market["pool"].copy(), p=market["p"])
         result = calculate_cpmm_purchase(state, 50, "YES")
         
@@ -2214,7 +2240,7 @@ if __name__ == "__main__":
         
         new_prob = get_cpmm_probability(result["new_pool"], result["new_p"])
         print(f"   Shares received: {shares:.2f}")
-        print(f"   Avg price: ${50/shares:.4f} per share")
+        print(f"   Avg price: {50/shares:.4f}ŧ per share")
         print(f"   Probability: {prob:.2%} → {new_prob:.2%}")
         
         # 4. Check position
@@ -2222,14 +2248,14 @@ if __name__ == "__main__":
         pos = db.get_position(market_id, "test-user")
         current_value = pos["yes_shares"] * new_prob
         print(f"   YES shares: {pos['yes_shares']:.2f}")
-        print(f"   Total invested: ${pos['total_invested']:.2f}")
-        print(f"   Current value: ${current_value:.2f}")
-        print(f"   P&L: ${current_value - pos['total_invested']:.2f}")
+        print(f"   Total invested: {pos['total_invested']:.2f}ŧ")
+        print(f"   Current value: {current_value:.2f}ŧ")
+        print(f"   P&L: {current_value - pos['total_invested']:.2f}ŧ")
         
         # 5. Check user balance
         print("\n5. Checking user balance...")
         user = db.get_user("test-user")
-        print(f"   Balance: ${user['balance']:.2f}")
+        print(f"   Balance: {user['balance']:.2f}ŧ")
         print(f"   Total bets: {user['total_bets']}")
         
         print("\n" + "=" * 60)
