@@ -567,7 +567,7 @@ class Storage:
                 cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
                 conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
     
     def increment_user_markets_created(self, user_id: str):
         """Increment user's markets_created counter."""
