@@ -15,11 +15,12 @@ from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, unquote
 
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability, Outcome as CpmmOutcome
+from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT
 import secrets
 import hashlib
 import psycopg2
@@ -1428,7 +1429,11 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
 
 @app.post("/markets/{market_id}/bet", response_model=BetResponse)
 async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(require_auth)):
-    """Place a bet on a market."""
+    """Place a bet on a market.
+    
+    Rate limited: max 30 bets per agent per minute.
+    Max bet amount: 500ŧ per single bet.
+    """
     # Require twitter verification before trading
     if user.get("status") != "claimed":
         raise HTTPException(
@@ -1436,6 +1441,25 @@ async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(requir
             detail="Twitter verification required before trading. Visit /claim/{user_id} to link your Twitter account."
         )
     
+    # ── Max bet amount ──
+    if req.amount > MAX_BET_AMOUNT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Bet amount {req.amount}ŧ exceeds maximum of {MAX_BET_AMOUNT}ŧ per bet.",
+        )
+
+    # ── Rate limit: bets per agent ──
+    allowed, info = rate_limiter.check(
+        f"bet:{user['id']}",
+        max_requests=MAX_BETS_PER_MINUTE,
+        window_seconds=60,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Betting rate limit exceeded ({MAX_BETS_PER_MINUTE}/minute). {info['detail']}",
+        )
+
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
@@ -1952,7 +1976,7 @@ async def get_user(user_id: str):
 # =============================================================================
 
 @app.post("/agents/register", response_model=AgentRegisteredWithClaim)
-async def register_agent(req: AgentRegister):
+async def register_agent(req: AgentRegister, request: Request):
     """
     Register a new agent and get an API key.
     
@@ -1960,7 +1984,22 @@ async def register_agent(req: AgentRegister):
     
     Returns a verification_code and claim_url for human-agent linking.
     The human must tweet the verification code to claim the agent.
+    
+    Rate limited: max 5 registrations per IP per hour.
     """
+    # ── Rate limit: registrations per IP ──
+    client_ip = request.client.host if request.client else "unknown"
+    allowed, info = rate_limiter.check(
+        f"register:{client_ip}",
+        max_requests=MAX_REGISTRATIONS_PER_HOUR,
+        window_seconds=3600,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Registration rate limit exceeded ({MAX_REGISTRATIONS_PER_HOUR}/hour per IP). {info['detail']}",
+        )
+
     # Normalize username to lowercase (case-insensitive uniqueness)
     username = req.username.lower()
     
