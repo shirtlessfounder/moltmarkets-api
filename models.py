@@ -147,6 +147,31 @@ class LeaderboardEntry(BaseModel):
     win_rate: float
 
 
+class ProbabilityPoint(BaseModel):
+    """Single point in probability history."""
+    timestamp: datetime
+    probability: float
+    volume: float
+
+
+class MarketHistory(BaseModel):
+    """Probability history for charts."""
+    market_id: str
+    points: List[ProbabilityPoint]
+
+
+class BetHistoryItem(BaseModel):
+    """Single bet in history."""
+    bet_id: str
+    user_id: str
+    username: str
+    outcome: Outcome
+    amount: float
+    shares: float
+    probability_after: float
+    created_at: datetime
+
+
 # =============================================================================
 # Error Models
 # =============================================================================

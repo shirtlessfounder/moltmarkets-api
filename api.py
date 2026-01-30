@@ -18,6 +18,7 @@ from models import (
     MarketCreate, MarketResolve, MarketSummary, MarketDetail,
     BetRequest, BetResponse, Position, MarketPositions,
     UserProfile, UserMe, ErrorResponse, LeaderboardEntry,
+    ProbabilityPoint, MarketHistory, BetHistoryItem,
     MarketStatus, Outcome,
 )
 
@@ -420,6 +421,71 @@ async def get_positions(market_id: str):
         ))
     
     return MarketPositions(market_id=market_id, positions=positions)
+
+
+@app.get("/markets/{market_id}/history", response_model=MarketHistory)
+async def get_market_history(market_id: str):
+    """Get probability history for charts."""
+    market = db.get_market(market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    
+    # Get all bets for this market, sorted by time
+    market_bets = sorted(
+        [b for b in db.bets.values() if b["market_id"] == market_id],
+        key=lambda x: x["created_at"]
+    )
+    
+    points = []
+    
+    # Add initial point (50% at market creation)
+    points.append(ProbabilityPoint(
+        timestamp=market["created_at"],
+        probability=0.5,
+        volume=0.0,
+    ))
+    
+    # Add point for each bet
+    cumulative_volume = 0.0
+    for bet in market_bets:
+        cumulative_volume += bet["amount"]
+        points.append(ProbabilityPoint(
+            timestamp=bet["created_at"],
+            probability=bet["probability_after"],
+            volume=cumulative_volume,
+        ))
+    
+    return MarketHistory(market_id=market_id, points=points)
+
+
+@app.get("/markets/{market_id}/bets", response_model=List[BetHistoryItem])
+async def get_market_bets(market_id: str):
+    """Get all bets for a market."""
+    market = db.get_market(market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    
+    market_bets = sorted(
+        [b for b in db.bets.values() if b["market_id"] == market_id],
+        key=lambda x: x["created_at"],
+        reverse=True  # Most recent first
+    )
+    
+    items = []
+    for bet in market_bets:
+        user = db.get_user(bet["user_id"])
+        items.append(BetHistoryItem(
+            bet_id=bet["id"],
+            user_id=bet["user_id"],
+            username=user["username"] if user else "unknown",
+            outcome=bet["outcome"],
+            amount=bet["amount"],
+            shares=bet["shares"],
+            probability_after=bet["probability_after"],
+            created_at=bet["created_at"],
+        ))
+    
+    return items
 
 
 # =============================================================================
