@@ -2,13 +2,16 @@
 MoltMarkets API — FastAPI application.
 
 Binary prediction markets with CPMM market maker.
-Uses in-memory storage (swap for real DB later).
+Uses JSON file persistence (upgrade to Postgres later).
 """
 
+import os
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +25,13 @@ from models import (
     MarketStatus, Outcome,
 )
 
+# Persistence file path (use env var for Railway volume or default to local)
+_data_path = os.getenv("DATA_PATH", "/data/moltmarkets.json")
+# Fallback to current directory if /data doesn't exist (local dev)
+if not os.path.exists("/data"):
+    _data_path = "./moltmarkets.json"
+DATA_FILE = Path(_data_path)
+
 
 # =============================================================================
 # In-Memory Storage (swap for DB later)
@@ -29,7 +39,7 @@ from models import (
 
 class Storage:
     """
-    In-memory storage. Designed for easy DB replacement.
+    In-memory storage with JSON file persistence.
     
     All methods are sync for now — make async when adding real DB.
     """
@@ -39,6 +49,74 @@ class Storage:
         self.users: Dict[str, dict] = {}
         self.bets: Dict[str, dict] = {}
         self.positions: Dict[str, Dict[str, dict]] = {}  # market_id -> user_id -> position
+        self._load()
+    
+    def _serialize_datetime(self, obj):
+        """Convert datetime objects to ISO strings for JSON."""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, dict):
+            return {k: self._serialize_datetime(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._serialize_datetime(i) for i in obj]
+        elif isinstance(obj, MarketStatus):
+            return obj.value
+        elif isinstance(obj, Outcome):
+            return obj.value
+        return obj
+    
+    def _deserialize_datetime(self, obj, datetime_keys=None):
+        """Convert ISO strings back to datetime objects."""
+        datetime_keys = datetime_keys or {"created_at", "closes_at", "resolved_at"}
+        if isinstance(obj, dict):
+            result = {}
+            for k, v in obj.items():
+                if k in datetime_keys and isinstance(v, str):
+                    try:
+                        result[k] = datetime.fromisoformat(v)
+                    except:
+                        result[k] = v
+                elif k == "status" and isinstance(v, str):
+                    result[k] = MarketStatus(v)
+                elif k == "resolution" and isinstance(v, str):
+                    result[k] = Outcome(v)
+                elif k == "outcome" and isinstance(v, str):
+                    result[k] = Outcome(v)
+                else:
+                    result[k] = self._deserialize_datetime(v, datetime_keys)
+            return result
+        elif isinstance(obj, list):
+            return [self._deserialize_datetime(i, datetime_keys) for i in obj]
+        return obj
+    
+    def _save(self):
+        """Save state to JSON file."""
+        try:
+            DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "markets": self._serialize_datetime(self.markets),
+                "users": self._serialize_datetime(self.users),
+                "bets": self._serialize_datetime(self.bets),
+                "positions": self._serialize_datetime(self.positions),
+            }
+            with open(DATA_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Failed to save data: {e}")
+    
+    def _load(self):
+        """Load state from JSON file."""
+        try:
+            if DATA_FILE.exists():
+                with open(DATA_FILE, "r") as f:
+                    data = json.load(f)
+                self.markets = self._deserialize_datetime(data.get("markets", {}))
+                self.users = self._deserialize_datetime(data.get("users", {}))
+                self.bets = self._deserialize_datetime(data.get("bets", {}))
+                self.positions = self._deserialize_datetime(data.get("positions", {}))
+                print(f"Loaded {len(self.markets)} markets, {len(self.users)} users from {DATA_FILE}")
+        except Exception as e:
+            print(f"Warning: Failed to load data: {e}")
     
     # --- Users ---
     
@@ -57,10 +135,12 @@ class Storage:
             "profit_all_time": 0.0,
         }
         self.users[user_id] = user
+        self._save()
         return user
     
     def update_user_balance(self, user_id: str, delta: float) -> float:
         self.users[user_id]["balance"] += delta
+        self._save()
         return self.users[user_id]["balance"]
     
     # --- Markets ---
@@ -94,6 +174,7 @@ class Storage:
         self.markets[market_id] = market
         self.positions[market_id] = {}
         self.users[creator_id]["markets_created"] += 1
+        self._save()
         return market
     
     def update_market_pool(self, market_id: str, new_pool: dict, new_p: float, volume_delta: float):
@@ -101,12 +182,14 @@ class Storage:
         market["pool"] = new_pool
         market["p"] = new_p
         market["total_volume"] += volume_delta
+        self._save()
     
     def resolve_market(self, market_id: str, outcome: Outcome):
         market = self.markets[market_id]
         market["status"] = MarketStatus.RESOLVED
         market["resolution"] = outcome
         market["resolved_at"] = datetime.now(timezone.utc)
+        self._save()
     
     # --- Bets ---
     
@@ -127,6 +210,7 @@ class Storage:
         }
         self.bets[bet_id] = bet
         self.users[user_id]["total_bets"] += 1
+        self._save()
         return bet
     
     # --- Positions ---
@@ -157,6 +241,7 @@ class Storage:
         else:
             pos["no_shares"] += shares_delta
         pos["total_invested"] += invested_delta
+        self._save()
 
 
 # Global storage instance
@@ -192,8 +277,11 @@ async def lifespan(app: FastAPI):
     # Startup: seed demo data if empty
     if not db.users:
         db.create_user("demo-user", "demo_user", balance=10000.0)
+    print(f"MoltMarkets API started with {len(db.markets)} markets, {len(db.users)} users")
     yield
-    # Shutdown: nothing to clean up for in-memory
+    # Shutdown: ensure final save
+    db._save()
+    print("MoltMarkets API shutting down")
 
 
 app = FastAPI(
