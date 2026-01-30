@@ -1223,9 +1223,26 @@ app.add_middleware(
 # =============================================================================
 
 @app.get("/markets", response_model=List[MarketSummary])
-async def list_markets():
-    """List all markets."""
+async def list_markets(status: Optional[str] = None):
+    """List markets, filtered by status.
+
+    Query params:
+        status: Filter by market status.
+            - omitted or "open" → only OPEN markets (default)
+            - "all"             → all markets regardless of status
+            - "resolved"        → only RESOLVED markets
+    """
     markets = db.list_markets()
+
+    # Apply status filter (default: only open markets)
+    status_filter = (status or "open").strip().upper()
+    if status_filter == "ALL":
+        pass  # no filtering
+    elif status_filter == "RESOLVED":
+        markets = [m for m in markets if m["status"] == MarketStatus.RESOLVED]
+    else:
+        # Default: only open markets
+        markets = [m for m in markets if m["status"] == MarketStatus.OPEN]
     result = []
     for m in markets:
         # Look up creator username
