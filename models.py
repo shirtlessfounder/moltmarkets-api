@@ -21,6 +21,7 @@ class Outcome(str, Enum):
 
 class MarketStatus(str, Enum):
     OPEN = "OPEN"
+    RESOLVING = "RESOLVING"
     CLOSED = "CLOSED"
     RESOLVED = "RESOLVED"
 
