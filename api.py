@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -75,7 +75,7 @@ class Storage:
             host=parsed.hostname,
             port=parsed.port or 5432,
             user=parsed.username,
-            password=parsed.password,
+            password=unquote(parsed.password) if parsed.password else None,
             dbname=parsed.path.lstrip('/'),
             cursor_factory=RealDictCursor
         )
