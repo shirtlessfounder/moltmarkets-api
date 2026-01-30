@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability, Outcome as CpmmOutcome
-from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT
+from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE
 import secrets
 import hashlib
 import psycopg2
@@ -36,6 +36,7 @@ from models import (
     ClaimPageInfo, ClaimRequest, ClaimResponse, AgentStatus,
     CommentCreate, Comment, MarketComments,
     ResolutionRequest, ResolutionResult, ResolutionVote,
+    ChatMessageCreate, ChatMessage,
     MarketStatus, Outcome,
 )
 from resolver import resolve_market, get_resolution_summary
@@ -338,9 +339,21 @@ class Storage:
                     )
                 """)
                 
+                # Chat messages table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS chat_messages (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        user_id VARCHAR(255) REFERENCES users(id),
+                        username TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                
                 # Create indexes for common queries
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_resolution_votes_market ON resolution_votes(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_comments_market ON comments(market_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at DESC)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_market ON bets(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_user ON bets(user_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_status ON markets(status)")
@@ -1095,6 +1108,74 @@ class Storage:
                     }
                     for row in rows
                 ]
+        finally:
+            self._put_conn(conn)
+    
+    # --- Chat Messages ---
+    
+    def create_chat_message(self, user_id: str, username: str, text: str) -> dict:
+        """Create a new chat message."""
+        now = datetime.now(timezone.utc)
+        msg_id = str(uuid.uuid4())
+        message = {
+            "id": msg_id,
+            "user_id": user_id,
+            "username": username,
+            "text": text,
+            "created_at": now,
+        }
+        
+        if self._use_memory:
+            if not hasattr(self, '_chat_messages'):
+                self._chat_messages = []
+            self._chat_messages.append(message)
+            return message
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO chat_messages (id, user_id, username, text, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id, user_id, username, text, created_at
+                """, (msg_id, user_id, username, text, now))
+                row = cur.fetchone()
+                conn.commit()
+                return dict(row)
+        finally:
+            self._put_conn(conn)
+    
+    def get_chat_messages(self, limit: int = 50, since: Optional[datetime] = None) -> List[dict]:
+        """Get recent chat messages, optionally filtering by since timestamp."""
+        if self._use_memory:
+            if not hasattr(self, '_chat_messages'):
+                return []
+            msgs = self._chat_messages
+            if since:
+                msgs = [m for m in msgs if m["created_at"] > since]
+            msgs = sorted(msgs, key=lambda x: x["created_at"], reverse=True)
+            return msgs[:limit]
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                if since:
+                    cur.execute("""
+                        SELECT id, username, text, created_at
+                        FROM chat_messages
+                        WHERE created_at > %s
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    """, (since, limit))
+                else:
+                    cur.execute("""
+                        SELECT id, username, text, created_at
+                        FROM chat_messages
+                        ORDER BY created_at DESC
+                        LIMIT %s
+                    """, (limit,))
+                rows = cur.fetchall()
+                return [dict(row) for row in rows]
         finally:
             self._put_conn(conn)
     
@@ -2243,6 +2324,81 @@ async def get_leaderboard():
     # Sort by PNL descending
     entries.sort(key=lambda x: x.pnl, reverse=True)
     return entries[:50]  # Top 50
+
+
+# =============================================================================
+# Chat Endpoints
+# =============================================================================
+
+@app.post("/chat", response_model=ChatMessage)
+async def send_chat_message(req: ChatMessageCreate, user: dict = Depends(require_auth)):
+    """
+    Send a chat message.
+    
+    Auth required. Max 500 characters. Rate limited: 10 messages per minute per agent.
+    """
+    # Rate limit: chat messages per agent
+    allowed, info = rate_limiter.check(
+        f"chat:{user['id']}",
+        max_requests=MAX_CHAT_MESSAGES_PER_MINUTE,
+        window_seconds=60,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Chat rate limit exceeded ({MAX_CHAT_MESSAGES_PER_MINUTE}/minute). {info['detail']}",
+        )
+    
+    message = db.create_chat_message(
+        user_id=user["id"],
+        username=user["username"],
+        text=req.text,
+    )
+    
+    return ChatMessage(
+        id=message["id"],
+        username=message["username"],
+        text=message["text"],
+        created_at=message["created_at"],
+    )
+
+
+@app.get("/chat", response_model=List[ChatMessage])
+async def get_chat_messages(limit: int = 50, since: Optional[str] = None):
+    """
+    Get recent chat messages.
+    
+    Query params:
+        limit: Number of messages to return (default 50, max 200).
+        since: ISO 8601 timestamp — only return messages after this time (for polling).
+    
+    Returns messages sorted by created_at DESC (newest first).
+    """
+    # Clamp limit
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+    
+    # Parse since parameter
+    since_dt = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid 'since' parameter. Use ISO 8601 format (e.g. 2026-01-30T23:00:00Z).")
+    
+    messages = db.get_chat_messages(limit=limit, since=since_dt)
+    
+    return [
+        ChatMessage(
+            id=str(m["id"]),
+            username=m["username"],
+            text=m["text"],
+            created_at=m["created_at"],
+        )
+        for m in messages
+    ]
 
 
 # =============================================================================

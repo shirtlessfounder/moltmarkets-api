@@ -367,6 +367,27 @@ class MarketComments(BaseModel):
 # Resolution Models
 # =============================================================================
 
+# =============================================================================
+# Chat Models
+# =============================================================================
+
+class ChatMessageCreate(BaseModel):
+    """Request to send a chat message."""
+    text: str = Field(..., min_length=1, max_length=500)
+
+
+class ChatMessage(BaseModel):
+    """A chat message."""
+    id: str
+    username: str
+    text: str
+    created_at: datetime
+
+
+# =============================================================================
+# Resolution Models (continued)
+# =============================================================================
+
 class ResolutionVote(BaseModel):
     """A single resolver agent's vote."""
     agent_id: str
