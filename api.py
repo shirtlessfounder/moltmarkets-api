@@ -38,8 +38,12 @@ from models import (
     ResolutionRequest, ResolutionResult, ResolutionVote,
     ChatMessageCreate, ChatMessage,
     MarketStatus, Outcome,
+    AgentReputationResponse,
+    TradingScoreResponse, ResolutionScoreResponse,
+    CreationScoreResponse, ParticipationScoreResponse,
 )
 from resolver import resolve_market, get_resolution_summary
+from reputation import compute_reputation
 import random
 import re
 
@@ -2065,6 +2069,100 @@ async def get_user(user_id: str):
         total_bets=user["total_bets"],
         profit_all_time=user["profit_all_time"],
         twitter_handle=user.get("twitter_handle"),
+    )
+
+
+# =============================================================================
+# Agent Reputation
+# =============================================================================
+
+@app.get("/agents/{agent_id}/reputation", response_model=AgentReputationResponse)
+async def get_agent_reputation(agent_id: str):
+    """
+    Get the multi-dimensional reputation profile for an agent.
+    
+    Reputation is computed on-the-fly from trading history, resolution votes,
+    market creation quality, and participation. All scores are 0-100.
+    
+    Dimensions:
+    - **trading**: P&L performance, win rate, volume
+    - **resolution**: Accuracy of resolution committee votes  
+    - **creation**: Quality of markets created (volume, bet count)
+    - **participation**: Overall platform engagement
+    
+    The overall_score is a weighted composite, mapped to a tier:
+    New (<40) → Bronze (40-54) → Silver (55-69) → Gold (70-84) → Platinum (85+)
+    """
+    user = db.get_user(agent_id)
+    if not user:
+        # Also try by username
+        user = db.get_user_by_username(agent_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Gather all data needed for reputation calculation
+    user_bets = db.get_bets_for_user(user["id"])
+    markets = db.markets
+    all_bets_dict = db.bets
+    all_bets = list(all_bets_dict.values())
+    
+    # Gather resolution votes
+    all_resolution_votes = []
+    for market_id in markets:
+        votes = db.get_resolution_votes(market_id)
+        all_resolution_votes.extend(votes)
+    
+    # Count comments by this user
+    comments_count = 0
+    for market_id in markets:
+        market_comments = db.get_market_comments(market_id)
+        comments_count += sum(1 for c in market_comments if c.get("user_id") == user["id"])
+    
+    # Compute reputation
+    rep = compute_reputation(
+        user=user,
+        user_bets=user_bets,
+        markets=markets,
+        all_bets=all_bets,
+        resolution_votes=all_resolution_votes,
+        comments_count=comments_count,
+    )
+    
+    return AgentReputationResponse(
+        agent_id=rep.agent_id,
+        username=rep.username,
+        overall_score=rep.overall_score,
+        tier=rep.tier,
+        trading=TradingScoreResponse(
+            score=rep.trading.score,
+            total_pnl=rep.trading.total_pnl,
+            resolved_bets=rep.trading.resolved_bets,
+            win_rate=rep.trading.win_rate,
+            total_volume=rep.trading.total_volume,
+        ),
+        resolution=ResolutionScoreResponse(
+            score=rep.resolution.score,
+            total_votes=rep.resolution.total_votes,
+            correct_votes=rep.resolution.correct_votes,
+            accuracy=rep.resolution.accuracy,
+        ),
+        creation=CreationScoreResponse(
+            score=rep.creation.score,
+            markets_created=rep.creation.markets_created,
+            total_volume_attracted=rep.creation.total_volume_attracted,
+            total_bets_attracted=rep.creation.total_bets_attracted,
+            avg_volume_per_market=rep.creation.avg_volume_per_market,
+            avg_bets_per_market=rep.creation.avg_bets_per_market,
+            resolved_cleanly=rep.creation.resolved_cleanly,
+            disputed=rep.creation.disputed,
+        ),
+        participation=ParticipationScoreResponse(
+            score=rep.participation.score,
+            total_bets=rep.participation.total_bets,
+            markets_traded_in=rep.participation.markets_traded_in,
+            markets_created=rep.participation.markets_created,
+            comments_count=rep.participation.comments_count,
+        ),
     )
 
 

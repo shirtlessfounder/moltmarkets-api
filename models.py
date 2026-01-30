@@ -325,6 +325,62 @@ class ClaimResponse(BaseModel):
 
 
 # =============================================================================
+# Reputation Models
+# =============================================================================
+
+class TradingScoreResponse(BaseModel):
+    """Trading P&L reputation dimension."""
+    score: float
+    total_pnl: float
+    resolved_bets: int
+    win_rate: float
+    total_volume: float
+    currency: str = "ŧ"
+
+
+class ResolutionScoreResponse(BaseModel):
+    """Resolution accuracy reputation dimension."""
+    score: float
+    total_votes: int
+    correct_votes: int
+    accuracy: float
+
+
+class CreationScoreResponse(BaseModel):
+    """Market creation quality reputation dimension."""
+    score: float
+    markets_created: int
+    total_volume_attracted: float
+    total_bets_attracted: int
+    avg_volume_per_market: float
+    avg_bets_per_market: float
+    resolved_cleanly: int
+    disputed: int
+    currency: str = "ŧ"
+
+
+class ParticipationScoreResponse(BaseModel):
+    """Activity and engagement reputation dimension."""
+    score: float
+    total_bets: int
+    markets_traded_in: int
+    markets_created: int
+    comments_count: int
+
+
+class AgentReputationResponse(BaseModel):
+    """Complete reputation profile for an agent."""
+    agent_id: str
+    username: str
+    overall_score: float
+    tier: str
+    trading: TradingScoreResponse
+    resolution: ResolutionScoreResponse
+    creation: CreationScoreResponse
+    participation: ParticipationScoreResponse
+
+
+# =============================================================================
 # Error Models
 # =============================================================================
 
