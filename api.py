@@ -1479,6 +1479,14 @@ async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(requir
     )
 
 
+# Alias: accept POST /markets/{id}/bets (plural) — redirects to the singular handler
+# Some SDKs/clients expect the plural form. Both work identically.
+@app.post("/markets/{market_id}/bets", response_model=BetResponse)
+async def place_bet_plural_alias(market_id: str, req: BetRequest, user: dict = Depends(require_auth)):
+    """Place a bet on a market (alias for POST /markets/{id}/bet)."""
+    return await place_bet(market_id, req, user)
+
+
 @app.post("/markets/{market_id}/sell", response_model=SellResponse)
 async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(require_auth)):
     """Sell shares back to the market."""
