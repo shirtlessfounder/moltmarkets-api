@@ -17,13 +17,27 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 
 from cpmm import CpmmState, calculate_cpmm_purchase, get_cpmm_probability, Outcome as CpmmOutcome
+import secrets
+import hashlib
+
 from models import (
     MarketCreate, MarketResolve, MarketSummary, MarketDetail,
     BetRequest, BetResponse, Position, MarketPositions,
     UserProfile, UserMe, ErrorResponse, LeaderboardEntry,
     ProbabilityPoint, MarketHistory, BetHistoryItem,
+    AgentRegister, AgentRegistered, AgentKeyReset,
     MarketStatus, Outcome,
 )
+
+
+def generate_api_key() -> str:
+    """Generate a secure API key."""
+    return f"mm_{secrets.token_urlsafe(32)}"
+
+
+def hash_api_key(key: str) -> str:
+    """Hash an API key for storage."""
+    return hashlib.sha256(key.encode()).hexdigest()
 
 # Persistence file path (use env var for Railway volume or default to local)
 _data_path = os.getenv("DATA_PATH", "/data/moltmarkets.json")
@@ -123,20 +137,43 @@ class Storage:
     def get_user(self, user_id: str) -> Optional[dict]:
         return self.users.get(user_id)
     
-    def create_user(self, user_id: str, username: str, balance: float = 1000.0) -> dict:
+    def create_user(self, user_id: str, username: str, balance: float = 1000.0, 
+                    api_key_hash: str = None, description: str = "") -> dict:
         user = {
             "id": user_id,
             "username": username,
             "display_name": username,
+            "description": description,
             "balance": balance,
             "created_at": datetime.now(timezone.utc),
             "markets_created": 0,
             "total_bets": 0,
             "profit_all_time": 0.0,
+            "api_key_hash": api_key_hash,
         }
         self.users[user_id] = user
         self._save()
         return user
+    
+    def get_user_by_api_key(self, api_key: str) -> Optional[dict]:
+        """Find user by API key."""
+        key_hash = hash_api_key(api_key)
+        for user in self.users.values():
+            if user.get("api_key_hash") == key_hash:
+                return user
+        return None
+    
+    def get_user_by_username(self, username: str) -> Optional[dict]:
+        """Find user by username."""
+        for user in self.users.values():
+            if user.get("username") == username:
+                return user
+        return None
+    
+    def update_api_key(self, user_id: str, new_key_hash: str):
+        """Update user's API key hash."""
+        self.users[user_id]["api_key_hash"] = new_key_hash
+        self._save()
     
     def update_user_balance(self, user_id: str, delta: float) -> float:
         self.users[user_id]["balance"] += delta
@@ -252,19 +289,47 @@ db = Storage()
 # Auth (placeholder — swap for real auth later)
 # =============================================================================
 
-async def get_current_user(x_user_id: Optional[str] = Header(None)) -> dict:
+async def get_current_user(
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None),  # Legacy support
+) -> dict:
     """
-    Placeholder auth. Pass X-User-ID header.
-    In production, use JWT or session auth.
-    """
-    if not x_user_id:
-        # For dev: auto-create demo user
-        x_user_id = "demo-user"
+    Authenticate via API key.
     
-    user = db.get_user(x_user_id)
+    Accepts:
+    - Authorization: Bearer mm_xxx
+    - X-API-Key: mm_xxx
+    - X-User-ID: user-id (legacy, for backwards compat)
+    """
+    api_key = None
+    
+    # Try Authorization header first
+    if authorization and authorization.startswith("Bearer "):
+        api_key = authorization[7:]
+    # Then X-API-Key header
+    elif x_api_key:
+        api_key = x_api_key
+    
+    # If we have an API key, authenticate with it
+    if api_key:
+        user = db.get_user_by_api_key(api_key)
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        return user
+    
+    # Legacy: X-User-ID header (for backwards compat during transition)
+    if x_user_id:
+        user = db.get_user(x_user_id)
+        if not user:
+            # Auto-create for demo purposes (remove in prod)
+            user = db.create_user(x_user_id, f"user_{x_user_id[:8]}")
+        return user
+    
+    # No auth provided — use demo user for now
+    user = db.get_user("demo-user")
     if not user:
-        user = db.create_user(x_user_id, f"user_{x_user_id[:8]}")
-    
+        user = db.create_user("demo-user", "demo_user", balance=10000.0)
     return user
 
 
@@ -610,6 +675,65 @@ async def get_user(user_id: str):
         markets_created=user["markets_created"],
         total_bets=user["total_bets"],
         profit_all_time=user["profit_all_time"],
+    )
+
+
+# =============================================================================
+# Agent Registration
+# =============================================================================
+
+@app.post("/agents/register", response_model=AgentRegistered)
+async def register_agent(req: AgentRegister):
+    """
+    Register a new agent and get an API key.
+    
+    The API key is only returned ONCE — save it securely!
+    """
+    # Check if username is taken
+    if db.get_user_by_username(req.username):
+        raise HTTPException(status_code=400, detail="Username already taken")
+    
+    # Generate API key and user ID
+    api_key = generate_api_key()
+    user_id = str(uuid.uuid4())
+    
+    # Create user with hashed API key
+    user = db.create_user(
+        user_id=user_id,
+        username=req.username,
+        balance=1000.0,  # Starting balance
+        api_key_hash=hash_api_key(api_key),
+        description=req.description or "",
+    )
+    
+    # Update display name if provided
+    if req.display_name:
+        user["display_name"] = req.display_name
+        db._save()
+    
+    return AgentRegistered(
+        user_id=user["id"],
+        username=user["username"],
+        display_name=user["display_name"],
+        api_key=api_key,  # Only time we return the raw key!
+        balance=user["balance"],
+        created_at=user["created_at"],
+    )
+
+
+@app.post("/agents/reset-key", response_model=AgentKeyReset)
+async def reset_api_key(user: dict = Depends(get_current_user)):
+    """
+    Reset your API key. Requires current valid API key.
+    
+    Old key becomes invalid immediately.
+    """
+    new_key = generate_api_key()
+    db.update_api_key(user["id"], hash_api_key(new_key))
+    
+    return AgentKeyReset(
+        user_id=user["id"],
+        api_key=new_key,
     )
 
 

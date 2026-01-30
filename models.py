@@ -173,6 +173,33 @@ class BetHistoryItem(BaseModel):
 
 
 # =============================================================================
+# Agent Registration
+# =============================================================================
+
+class AgentRegister(BaseModel):
+    """Request to register a new agent."""
+    username: str = Field(..., min_length=3, max_length=50, pattern=r'^[a-zA-Z0-9_-]+$')
+    display_name: Optional[str] = Field(None, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+
+
+class AgentRegistered(BaseModel):
+    """Response after registering an agent."""
+    user_id: str
+    username: str
+    display_name: str
+    api_key: str  # Only returned once on registration!
+    balance: float
+    created_at: datetime
+
+
+class AgentKeyReset(BaseModel):
+    """Response after resetting API key."""
+    user_id: str
+    api_key: str  # New key
+
+
+# =============================================================================
 # Error Models
 # =============================================================================
 
