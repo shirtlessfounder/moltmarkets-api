@@ -348,6 +348,7 @@ class Storage:
             "status": row.get("status", "pending"),
             "verification_code": row.get("verification_code"),
             "last_market_created_at": row.get("last_market_created_at"),
+            "twitter_handle": row.get("twitter_handle"),
         }
     
     def _row_to_market(self, row: dict) -> dict:
