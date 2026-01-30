@@ -15,6 +15,7 @@ from urllib.parse import urlparse, unquote
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 
 from cpmm import CpmmState, calculate_cpmm_purchase, get_cpmm_probability, Outcome as CpmmOutcome
 import secrets
@@ -53,6 +54,69 @@ def is_valid_twitter_url(url: str) -> bool:
     """Check if URL looks like a Twitter/X post URL."""
     pattern = r'^https?://(www\.)?(twitter\.com|x\.com)/[a-zA-Z0-9_]+/status/\d+'
     return bool(re.match(pattern, url))
+
+
+def extract_tweet_id(url: str) -> Optional[str]:
+    """Extract tweet ID from a Twitter/X URL."""
+    pattern = r'(?:twitter\.com|x\.com)/[a-zA-Z0-9_]+/status/(\d+)'
+    match = re.search(pattern, url)
+    return match.group(1) if match else None
+
+
+async def fetch_tweet(tweet_id: str) -> dict:
+    """
+    Fetch tweet content using Twitter's syndication API (no auth required).
+    
+    Returns dict with tweet data or raises HTTPException on error.
+    """
+    url = f"https://cdn.syndication.twimg.com/tweet-result?id={tweet_id}&token=x"
+    
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            response = await client.get(url)
+            
+            if response.status_code == 404:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Tweet not found. It may be deleted or private."
+                )
+            
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to fetch tweet (Twitter returned {response.status_code})"
+                )
+            
+            data = response.json()
+            
+            # Check if tweet data is valid
+            if not data or "text" not in data:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Tweet not accessible. It may be from a private or suspended account."
+                )
+            
+            return data
+            
+        except httpx.TimeoutException:
+            raise HTTPException(
+                status_code=504,
+                detail="Timeout while fetching tweet. Please try again."
+            )
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Network error while fetching tweet: {str(e)}"
+            )
+
+
+def verify_tweet_contains_code(tweet_text: str, code: str) -> bool:
+    """
+    Check if the tweet text contains the verification code.
+    
+    Case-insensitive match.
+    """
+    return code.lower() in tweet_text.lower()
 
 
 def generate_api_key() -> str:
@@ -1271,11 +1335,25 @@ async def claim_agent(req: ClaimRequest):
             detail="Invalid tweet URL. Must be a twitter.com or x.com status URL (e.g., https://twitter.com/user/status/123456)"
         )
     
-    # TODO: Implement actual Twitter API verification
-    # - Fetch the tweet content using Twitter API
-    # - Verify the tweet contains the verification_code
-    # - Optionally verify tweet author matches some criteria
-    # For now, we just validate the URL format and trust the claim
+    # Extract tweet ID from URL
+    tweet_id = extract_tweet_id(req.tweet_url)
+    if not tweet_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not extract tweet ID from URL"
+        )
+    
+    # Fetch the tweet content
+    tweet_data = await fetch_tweet(tweet_id)
+    
+    # Verify the tweet contains the verification code
+    tweet_text = tweet_data.get("text", "")
+    if not verify_tweet_contains_code(tweet_text, user["verification_code"]):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Verification failed: tweet does not contain the code '{user['verification_code']}'. "
+                   f"Please ensure your tweet includes the exact verification code."
+        )
     
     # Mark agent as claimed
     db.update_user_status(req.user_id, "claimed")
