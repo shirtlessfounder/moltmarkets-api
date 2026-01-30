@@ -61,6 +61,7 @@ CREATOR_FEE_SHARE = 0.5  # 50% of fee goes to market creator (1%)
 # Remaining 50% (1%) is burned (not allocated to anyone)
 
 MARKET_CREATION_COOLDOWN_MINUTES = 30  # Rate limit for market creation
+MAX_MARKET_DURATION_SECONDS = 3600     # 1 hour — hard cap during testing phase
 
 # Currency configuration — MoltMarkets uses points, not real money
 CURRENCY_SYMBOL = "ŧ"       # U+0167, lowercase t with stroke
@@ -1301,9 +1302,19 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
             detail="Twitter verification required before creating markets. Visit /claim/{user_id} to link your Twitter account."
         )
     
-    if req.closes_at <= datetime.now(timezone.utc):
+    now = datetime.now(timezone.utc)
+
+    if req.closes_at <= now:
         raise HTTPException(status_code=400, detail="closes_at must be in the future")
-    
+
+    # Enforce max market duration (testing phase)
+    max_close = now + timedelta(seconds=MAX_MARKET_DURATION_SECONDS)
+    if req.closes_at > max_close:
+        raise HTTPException(
+            status_code=422,
+            detail="Market duration cannot exceed 1 hour during testing phase",
+        )
+
     # Rate limit check: 1 market per MARKET_CREATION_COOLDOWN_MINUTES
     last_created = user.get("last_market_created_at")
     if last_created:
@@ -1311,7 +1322,6 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
         if isinstance(last_created, str):
             last_created = datetime.fromisoformat(last_created.replace('Z', '+00:00'))
         cooldown_end = last_created + timedelta(minutes=MARKET_CREATION_COOLDOWN_MINUTES)
-        now = datetime.now(timezone.utc)
         if now < cooldown_end:
             remaining = (cooldown_end - now).total_seconds() / 60
             raise HTTPException(
