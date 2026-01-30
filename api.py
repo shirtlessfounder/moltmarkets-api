@@ -788,6 +788,24 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    def update_market_status(self, market_id: str, status: MarketStatus):
+        """Update a market's status (e.g. OPEN → RESOLVING)."""
+        if self._use_memory:
+            market = self._markets[market_id]
+            market["status"] = status
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE markets SET status = %s WHERE id = %s",
+                    (status.value, market_id),
+                )
+                conn.commit()
+        finally:
+            self._put_conn(conn)
+    
     def resolve_market(self, market_id: str, outcome: Outcome):
         if self._use_memory:
             market = self._markets[market_id]
@@ -1314,20 +1332,30 @@ async def list_markets(status: Optional[str] = None):
 
     Query params:
         status: Filter by market status.
-            - omitted or "open" → only OPEN markets (default)
+            - omitted or "active" or "open" → only OPEN markets (default)
+            - "resolving"       → markets past closes_at, awaiting resolution
+            - "closed" or "resolved" → resolved markets
             - "all"             → all markets regardless of status
-            - "resolved"        → only RESOLVED markets
     """
     markets = db.list_markets()
 
-    # Apply status filter (default: only open markets)
-    status_filter = (status or "open").strip().upper()
+    # Auto-transition: move OPEN markets past closes_at to RESOLVING
+    now = datetime.now(timezone.utc)
+    for m in markets:
+        if m["status"] == MarketStatus.OPEN and m["closes_at"] <= now:
+            db.update_market_status(m["id"], MarketStatus.RESOLVING)
+            m["status"] = MarketStatus.RESOLVING
+
+    # Apply status filter (default: only open/active markets)
+    status_filter = (status or "active").strip().upper()
     if status_filter == "ALL":
         pass  # no filtering
-    elif status_filter == "RESOLVED":
+    elif status_filter in ("CLOSED", "RESOLVED"):
         markets = [m for m in markets if m["status"] == MarketStatus.RESOLVED]
+    elif status_filter == "RESOLVING":
+        markets = [m for m in markets if m["status"] == MarketStatus.RESOLVING]
     else:
-        # Default: only open markets
+        # Default: only open markets (ACTIVE or OPEN both map here)
         markets = [m for m in markets if m["status"] == MarketStatus.OPEN]
     result = []
     for m in markets:
@@ -1354,6 +1382,12 @@ async def get_market(market_id: str):
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
+    
+    # Auto-transition: OPEN → RESOLVING when closes_at has passed
+    now = datetime.now(timezone.utc)
+    if market["status"] == MarketStatus.OPEN and market["closes_at"] <= now:
+        db.update_market_status(market_id, MarketStatus.RESOLVING)
+        market["status"] = MarketStatus.RESOLVING
     
     # Look up creator username
     creator = db.get_user(market["creator_id"]) if market["creator_id"] else None
@@ -1486,6 +1520,12 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
     if market["status"] == MarketStatus.RESOLVED:
         raise HTTPException(status_code=400, detail="Market already resolved")
     
+    # Auto-transition OPEN → RESOLVING if closes_at has passed
+    now = datetime.now(timezone.utc)
+    if market["status"] == MarketStatus.OPEN and market["closes_at"] <= now:
+        db.update_market_status(market_id, MarketStatus.RESOLVING)
+        market["status"] = MarketStatus.RESOLVING
+    
     db.resolve_market(market_id, req.outcome)
     
     # Payout positions
@@ -1561,10 +1601,17 @@ async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(requir
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
     
-    if market["status"] != MarketStatus.OPEN:
-        raise HTTPException(status_code=400, detail="Market is not open for trading")
+    # Auto-transition: OPEN → RESOLVING when closes_at has passed
+    now = datetime.now(timezone.utc)
+    if market["status"] == MarketStatus.OPEN and market["closes_at"] <= now:
+        db.update_market_status(market_id, MarketStatus.RESOLVING)
+        market["status"] = MarketStatus.RESOLVING
     
-    if market["closes_at"] <= datetime.now(timezone.utc):
+    if market["status"] != MarketStatus.OPEN:
+        status_msg = "Market is resolving (closed, awaiting resolution)" if market["status"] == MarketStatus.RESOLVING else "Market is not open for trading"
+        raise HTTPException(status_code=400, detail=status_msg)
+    
+    if market["closes_at"] <= now:
         raise HTTPException(status_code=400, detail="Market has closed")
     
     # Calculate trade fee (2% total)
@@ -1649,10 +1696,17 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
     
-    if market["status"] != MarketStatus.OPEN:
-        raise HTTPException(status_code=400, detail="Market is not open for trading")
+    # Auto-transition: OPEN → RESOLVING when closes_at has passed
+    now = datetime.now(timezone.utc)
+    if market["status"] == MarketStatus.OPEN and market["closes_at"] <= now:
+        db.update_market_status(market_id, MarketStatus.RESOLVING)
+        market["status"] = MarketStatus.RESOLVING
     
-    if market["closes_at"] <= datetime.now(timezone.utc):
+    if market["status"] != MarketStatus.OPEN:
+        status_msg = "Market is resolving (closed, awaiting resolution)" if market["status"] == MarketStatus.RESOLVING else "Market is not open for trading"
+        raise HTTPException(status_code=400, detail=status_msg)
+    
+    if market["closes_at"] <= now:
         raise HTTPException(status_code=400, detail="Market has closed")
     
     # Get user's position
@@ -1910,6 +1964,12 @@ async def request_resolution(market_id: str, user: dict = Depends(require_auth))
     
     if market["status"] == MarketStatus.RESOLVED:
         raise HTTPException(status_code=400, detail="Market already resolved")
+    
+    # Auto-transition OPEN → RESOLVING if closes_at has passed
+    now = datetime.now(timezone.utc)
+    if market["status"] == MarketStatus.OPEN and market["closes_at"] <= now:
+        db.update_market_status(market_id, MarketStatus.RESOLVING)
+        market["status"] = MarketStatus.RESOLVING
     
     # Get API keys from environment
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")

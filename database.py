@@ -65,7 +65,7 @@ class DBMarket(Base):
     id: Mapped[str] = mapped_column(String(100), primary_key=True)
     title: Mapped[str] = mapped_column(String(500))
     description: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(20), default="OPEN")  # OPEN, CLOSED, RESOLVED
+    status: Mapped[str] = mapped_column(String(20), default="OPEN")  # OPEN, RESOLVING, CLOSED, RESOLVED
     closes_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
