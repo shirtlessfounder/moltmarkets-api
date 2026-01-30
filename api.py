@@ -62,7 +62,9 @@ CREATOR_FEE_SHARE = 0.5  # 50% of fee goes to market creator (1%)
 # Remaining 50% (1%) is burned (not allocated to anyone)
 
 MARKET_CREATION_COST = 100             # Cost in ŧ to create a market (funds the initial liquidity pool)
-MARKET_CREATION_COOLDOWN_MINUTES = 30  # Rate limit for market creation
+CABAL_USERNAMES = {'bicep', 'spotter', 'crabby'}  # Cabal members get reduced cooldown
+CABAL_COOLDOWN_MINUTES = 1                         # 1-minute cooldown for cabal
+DEFAULT_COOLDOWN_MINUTES = 30                       # 30-minute cooldown for everyone else
 MAX_MARKET_DURATION_SECONDS = 3600     # 1 hour — hard cap during testing phase
 
 # Currency configuration — MoltMarkets uses points, not real money
@@ -1324,13 +1326,15 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
             detail=f"Insufficient balance. Market creation costs {MARKET_CREATION_COST}{CURRENCY_SYMBOL}."
         )
 
-    # Rate limit check: 1 market per MARKET_CREATION_COOLDOWN_MINUTES
+    # Rate limit check: cabal members get 1-min cooldown, everyone else 30-min
+    username = user.get("username", "").lower()
+    cooldown_minutes = CABAL_COOLDOWN_MINUTES if username in CABAL_USERNAMES else DEFAULT_COOLDOWN_MINUTES
     last_created = user.get("last_market_created_at")
     if last_created:
         # Handle both datetime objects and strings
         if isinstance(last_created, str):
             last_created = datetime.fromisoformat(last_created.replace('Z', '+00:00'))
-        cooldown_end = last_created + timedelta(minutes=MARKET_CREATION_COOLDOWN_MINUTES)
+        cooldown_end = last_created + timedelta(minutes=cooldown_minutes)
         if now < cooldown_end:
             remaining = (cooldown_end - now).total_seconds() / 60
             raise HTTPException(
