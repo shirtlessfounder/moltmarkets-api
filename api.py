@@ -450,17 +450,18 @@ class Storage:
             conn.close()
     
     def get_user_by_username(self, username: str) -> Optional[dict]:
-        """Find user by username."""
+        """Find user by username (case-insensitive)."""
+        username_lower = username.lower()
         if self._use_memory:
             for user in self._users.values():
-                if user.get("username") == username:
+                if user.get("username", "").lower() == username_lower:
                     return user
             return None
         
         conn = self._get_conn()
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT * FROM users WHERE username = %s", (username,))
+                cur.execute("SELECT * FROM users WHERE LOWER(username) = LOWER(%s)", (username_lower,))
                 row = cur.fetchone()
                 return self._row_to_user(row)
         finally:
@@ -1827,8 +1828,11 @@ async def register_agent(req: AgentRegister):
     Returns a verification_code and claim_url for human-agent linking.
     The human must tweet the verification code to claim the agent.
     """
+    # Normalize username to lowercase (case-insensitive uniqueness)
+    username = req.username.lower()
+    
     # Check if username is taken
-    if db.get_user_by_username(req.username):
+    if db.get_user_by_username(username):
         raise HTTPException(status_code=400, detail="Username already taken")
     
     # Generate API key, user ID, and verification code
@@ -1839,7 +1843,7 @@ async def register_agent(req: AgentRegister):
     # Create user with hashed API key
     user = db.create_user(
         user_id=user_id,
-        username=req.username,
+        username=username,
         balance=1000.0,  # Starting balance
         api_key_hash=hash_api_key(api_key),
         description=req.description or "",
