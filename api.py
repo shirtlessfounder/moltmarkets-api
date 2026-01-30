@@ -69,7 +69,16 @@ class Storage:
     
     def _get_conn(self):
         """Get a database connection."""
-        return psycopg2.connect(self.database_url, cursor_factory=RealDictCursor)
+        # Parse the URL to handle special characters in password
+        parsed = urlparse(self.database_url)
+        return psycopg2.connect(
+            host=parsed.hostname,
+            port=parsed.port or 5432,
+            user=parsed.username,
+            password=parsed.password,
+            dbname=parsed.path.lstrip('/'),
+            cursor_factory=RealDictCursor
+        )
     
     def _init_db(self):
         """Initialize database tables."""
