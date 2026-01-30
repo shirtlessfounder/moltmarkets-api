@@ -1057,7 +1057,7 @@ async def get_current_user(
     x_user_id: Optional[str] = Header(None),  # Legacy support
 ) -> dict:
     """
-    Authenticate via API key.
+    Authenticate via API key. Returns demo-user for anonymous reads.
     
     Accepts:
     - Authorization: Bearer mm_xxx
@@ -1088,10 +1088,40 @@ async def get_current_user(
             user = db.create_user(x_user_id, f"user_{x_user_id[:8]}")
         return user
     
-    # No auth provided — use demo user for now
+    # No auth provided — use demo user for anonymous reads
     user = db.get_user("demo-user")
     if not user:
         user = db.create_user("demo-user", "demo_user", balance=10000.0)
+    return user
+
+
+async def require_auth(
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+) -> dict:
+    """
+    Strict authentication required. No demo-user fallback.
+    Use this for all write operations (bets, markets, comments).
+    """
+    api_key = None
+    
+    # Try Authorization header first
+    if authorization and authorization.startswith("Bearer "):
+        api_key = authorization[7:]
+    # Then X-API-Key header
+    elif x_api_key:
+        api_key = x_api_key
+    
+    if not api_key:
+        raise HTTPException(
+            status_code=401, 
+            detail="Authentication required. Provide API key via 'Authorization: Bearer mm_xxx' or 'X-API-Key: mm_xxx' header."
+        )
+    
+    user = db.get_user_by_api_key(api_key)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
     return user
 
 
@@ -1175,7 +1205,7 @@ async def get_market(market_id: str):
 
 
 @app.post("/markets", response_model=MarketCreated)
-async def create_market(req: MarketCreate, user: dict = Depends(get_current_user)):
+async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
     """Create a new prediction market."""
     if req.closes_at <= datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="closes_at must be in the future")
@@ -1241,7 +1271,7 @@ async def create_market(req: MarketCreate, user: dict = Depends(get_current_user
 
 
 @app.post("/markets/{market_id}/resolve", response_model=MarketDetail)
-async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depends(get_current_user)):
+async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depends(require_auth)):
     """Resolve a market. Only creator can resolve."""
     market = db.get_market(market_id)
     if not market:
@@ -1286,7 +1316,7 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
 # =============================================================================
 
 @app.post("/markets/{market_id}/bet", response_model=BetResponse)
-async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(get_current_user)):
+async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(require_auth)):
     """Place a bet on a market."""
     market = db.get_market(market_id)
     if not market:
@@ -1359,7 +1389,7 @@ async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(get_cu
 
 
 @app.post("/markets/{market_id}/sell", response_model=SellResponse)
-async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(get_current_user)):
+async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(require_auth)):
     """Sell shares back to the market."""
     market = db.get_market(market_id)
     if not market:
@@ -1571,7 +1601,7 @@ async def get_comments(market_id: str):
 
 
 @app.post("/markets/{market_id}/comments", response_model=Comment)
-async def create_comment(market_id: str, req: CommentCreate, user: dict = Depends(get_current_user)):
+async def create_comment(market_id: str, req: CommentCreate, user: dict = Depends(require_auth)):
     """Create a comment on a market."""
     market = db.get_market(market_id)
     if not market:
@@ -1609,7 +1639,7 @@ async def create_comment(market_id: str, req: CommentCreate, user: dict = Depend
 # =============================================================================
 
 @app.post("/markets/{market_id}/request-resolution", response_model=ResolutionResult)
-async def request_resolution(market_id: str, user: dict = Depends(get_current_user)):
+async def request_resolution(market_id: str, user: dict = Depends(require_auth)):
     """
     Trigger the 9-agent resolution committee to vote on market resolution.
     
@@ -1750,7 +1780,7 @@ async def get_resolution_votes(market_id: str):
 # =============================================================================
 
 @app.get("/me", response_model=UserMe)
-async def get_me(user: dict = Depends(get_current_user)):
+async def get_me(user: dict = Depends(require_auth)):
     """Get current user profile with balance."""
     return UserMe(
         id=user["id"],
@@ -1836,7 +1866,7 @@ async def register_agent(req: AgentRegister):
 
 
 @app.post("/agents/reset-key", response_model=AgentKeyReset)
-async def reset_api_key(user: dict = Depends(get_current_user)):
+async def reset_api_key(user: dict = Depends(require_auth)):
     """
     Reset your API key. Requires current valid API key.
     
