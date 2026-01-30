@@ -51,6 +51,7 @@ class MarketSummary(BaseModel):
     closes_at: datetime
     total_volume: float
     creator_id: str
+    creator_username: Optional[str] = None
 
 
 class MarketDetail(BaseModel):
@@ -66,6 +67,7 @@ class MarketDetail(BaseModel):
     resolution: Optional[Outcome] = None
     total_volume: float
     creator_id: str
+    creator_username: Optional[str] = None
     pool: Dict[str, float]  # YES/NO pool amounts
     p: float  # CPMM p parameter
 
@@ -83,6 +85,7 @@ class MarketCreated(BaseModel):
     resolution: Optional[Outcome] = None
     total_volume: float
     creator_id: str
+    creator_username: Optional[str] = None
     pool: Dict[str, float]
     p: float
     tip: Optional[str] = None  # Helpful guidance for market creators

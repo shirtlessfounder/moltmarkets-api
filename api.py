@@ -1207,8 +1207,13 @@ app.add_middleware(
 async def list_markets():
     """List all markets."""
     markets = db.list_markets()
-    return [
-        MarketSummary(
+    result = []
+    for m in markets:
+        # Look up creator username
+        creator = db.get_user(m["creator_id"]) if m["creator_id"] else None
+        creator_username = creator["username"] if creator else None
+        
+        result.append(MarketSummary(
             id=m["id"],
             title=m["title"],
             probability=get_cpmm_probability(m["pool"], m["p"]),
@@ -1216,9 +1221,9 @@ async def list_markets():
             closes_at=m["closes_at"],
             total_volume=m["total_volume"],
             creator_id=m["creator_id"],
-        )
-        for m in markets
-    ]
+            creator_username=creator_username,
+        ))
+    return result
 
 
 @app.get("/markets/{market_id}", response_model=MarketDetail)
@@ -1227,6 +1232,10 @@ async def get_market(market_id: str):
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
+    
+    # Look up creator username
+    creator = db.get_user(market["creator_id"]) if market["creator_id"] else None
+    creator_username = creator["username"] if creator else None
     
     return MarketDetail(
         id=market["id"],
@@ -1240,6 +1249,7 @@ async def get_market(market_id: str):
         resolution=market["resolution"],
         total_volume=market["total_volume"],
         creator_id=market["creator_id"],
+        creator_username=creator_username,
         pool=market["pool"],
         p=market["p"],
     )
@@ -1311,6 +1321,7 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
         resolution=market["resolution"],
         total_volume=market["total_volume"],
         creator_id=market["creator_id"],
+        creator_username=user["username"],
         pool=market["pool"],
         p=market["p"],
         tip=tip,
@@ -1342,6 +1353,11 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
             db.update_user_profit(pos["user_id"], payout - pos["total_invested"])
     
     market = db.get_market(market_id)
+    
+    # Look up creator username
+    creator = db.get_user(market["creator_id"]) if market["creator_id"] else None
+    creator_username = creator["username"] if creator else None
+    
     return MarketDetail(
         id=market["id"],
         title=market["title"],
@@ -1354,6 +1370,7 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
         resolution=market["resolution"],
         total_volume=market["total_volume"],
         creator_id=market["creator_id"],
+        creator_username=creator_username,
         pool=market["pool"],
         p=market["p"],
     )
