@@ -81,6 +81,7 @@ class MarketSummary(BaseModel):
     total_volume: float
     creator_id: str
     creator_username: Optional[str] = None
+    currency: str = "ŧ"
 
 
 class MarketDetail(BaseModel):
@@ -99,6 +100,7 @@ class MarketDetail(BaseModel):
     creator_username: Optional[str] = None
     pool: Dict[str, float]  # YES/NO pool amounts
     p: float  # CPMM p parameter
+    currency: str = "ŧ"
 
 
 class MarketCreated(BaseModel):
