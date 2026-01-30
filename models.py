@@ -173,8 +173,13 @@ class BetHistoryItem(BaseModel):
 
 
 # =============================================================================
-# Agent Registration
+# Agent Registration & Claiming
 # =============================================================================
+
+class AgentStatus(str, Enum):
+    PENDING = "pending"
+    CLAIMED = "claimed"
+
 
 class AgentRegister(BaseModel):
     """Request to register a new agent."""
@@ -193,10 +198,48 @@ class AgentRegistered(BaseModel):
     created_at: datetime
 
 
+class AgentRegisteredWithClaim(BaseModel):
+    """Response after registering an agent (includes claim info)."""
+    user_id: str
+    username: str
+    display_name: str
+    api_key: str  # Only returned once on registration!
+    balance: float
+    created_at: datetime
+    status: AgentStatus
+    verification_code: str  # e.g., "crab-A1B2"
+    claim_url: str  # e.g., "/claim/{user_id}"
+
+
 class AgentKeyReset(BaseModel):
     """Response after resetting API key."""
     user_id: str
     api_key: str  # New key
+
+
+class ClaimPageInfo(BaseModel):
+    """Info for the claim page (public, no auth)."""
+    user_id: str
+    username: str
+    display_name: str
+    verification_code: str
+    instructions: str
+
+
+class ClaimRequest(BaseModel):
+    """Request to claim an agent."""
+    user_id: str
+    tweet_url: str = Field(..., min_length=10)
+
+
+class ClaimResponse(BaseModel):
+    """Response after claiming an agent."""
+    success: bool
+    message: str
+    user_id: str
+    username: str
+    display_name: str
+    status: AgentStatus
 
 
 # =============================================================================

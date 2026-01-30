@@ -27,9 +27,32 @@ from models import (
     BetRequest, BetResponse, Position, MarketPositions,
     UserProfile, UserMe, ErrorResponse, LeaderboardEntry,
     ProbabilityPoint, MarketHistory, BetHistoryItem,
-    AgentRegister, AgentRegistered, AgentKeyReset,
+    AgentRegister, AgentRegistered, AgentRegisteredWithClaim, AgentKeyReset,
+    ClaimPageInfo, ClaimRequest, ClaimResponse, AgentStatus,
     MarketStatus, Outcome,
 )
+import random
+import re
+
+
+# =============================================================================
+# Verification Code Generation
+# =============================================================================
+
+VERIFICATION_WORDS = ["crab", "shell", "reef", "wave", "tide", "coral", "kelp", "pearl", "anchor", "lobster"]
+
+
+def generate_verification_code() -> str:
+    """Generate a verification code like 'crab-A1B2'."""
+    word = random.choice(VERIFICATION_WORDS)
+    chars = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=4))
+    return f"{word}-{chars}"
+
+
+def is_valid_twitter_url(url: str) -> bool:
+    """Check if URL looks like a Twitter/X post URL."""
+    pattern = r'^https?://(www\.)?(twitter\.com|x\.com)/[a-zA-Z0-9_]+/status/\d+'
+    return bool(re.match(pattern, url))
 
 
 def generate_api_key() -> str:
@@ -98,8 +121,23 @@ class Storage:
                         markets_created INTEGER DEFAULT 0,
                         total_bets INTEGER DEFAULT 0,
                         profit_all_time DECIMAL(20, 8) DEFAULT 0.0,
-                        api_key_hash VARCHAR(255)
+                        api_key_hash VARCHAR(255),
+                        status VARCHAR(50) DEFAULT 'pending',
+                        verification_code VARCHAR(50)
                     )
+                """)
+                
+                # Add columns if they don't exist (for existing databases)
+                cur.execute("""
+                    DO $$ 
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='status') THEN
+                            ALTER TABLE users ADD COLUMN status VARCHAR(50) DEFAULT 'pending';
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='verification_code') THEN
+                            ALTER TABLE users ADD COLUMN verification_code VARCHAR(50);
+                        END IF;
+                    END $$;
                 """)
                 
                 # Markets table
@@ -175,6 +213,8 @@ class Storage:
             "total_bets": row["total_bets"],
             "profit_all_time": float(row["profit_all_time"]),
             "api_key_hash": row["api_key_hash"],
+            "status": row.get("status", "pending"),
+            "verification_code": row.get("verification_code"),
         }
     
     def _row_to_market(self, row: dict) -> dict:
@@ -240,7 +280,8 @@ class Storage:
             conn.close()
     
     def create_user(self, user_id: str, username: str, balance: float = 1000.0, 
-                    api_key_hash: str = None, description: str = "") -> dict:
+                    api_key_hash: str = None, description: str = "",
+                    status: str = "pending", verification_code: str = None) -> dict:
         if self._use_memory:
             user = {
                 "id": user_id,
@@ -253,6 +294,8 @@ class Storage:
                 "total_bets": 0,
                 "profit_all_time": 0.0,
                 "api_key_hash": api_key_hash,
+                "status": status,
+                "verification_code": verification_code,
             }
             self._users[user_id] = user
             return user
@@ -261,10 +304,10 @@ class Storage:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO users (id, username, display_name, description, balance, api_key_hash)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO users (id, username, display_name, description, balance, api_key_hash, status, verification_code)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
-                """, (user_id, username, username, description, balance, api_key_hash))
+                """, (user_id, username, username, description, balance, api_key_hash, status, verification_code))
                 row = cur.fetchone()
                 conn.commit()
                 return self._row_to_user(row)
@@ -390,6 +433,20 @@ class Storage:
         try:
             with conn.cursor() as cur:
                 cur.execute("UPDATE users SET profit_all_time = profit_all_time + %s WHERE id = %s", (profit_delta, user_id))
+                conn.commit()
+        finally:
+            conn.close()
+    
+    def update_user_status(self, user_id: str, status: str):
+        """Update user's claim status."""
+        if self._use_memory:
+            self._users[user_id]["status"] = status
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET status = %s WHERE id = %s", (status, user_id))
                 conn.commit()
         finally:
             conn.close()
@@ -1093,20 +1150,24 @@ async def get_user(user_id: str):
 # Agent Registration
 # =============================================================================
 
-@app.post("/agents/register", response_model=AgentRegistered)
+@app.post("/agents/register", response_model=AgentRegisteredWithClaim)
 async def register_agent(req: AgentRegister):
     """
     Register a new agent and get an API key.
     
     The API key is only returned ONCE — save it securely!
+    
+    Returns a verification_code and claim_url for human-agent linking.
+    The human must tweet the verification code to claim the agent.
     """
     # Check if username is taken
     if db.get_user_by_username(req.username):
         raise HTTPException(status_code=400, detail="Username already taken")
     
-    # Generate API key and user ID
+    # Generate API key, user ID, and verification code
     api_key = generate_api_key()
     user_id = str(uuid.uuid4())
+    verification_code = generate_verification_code()
     
     # Create user with hashed API key
     user = db.create_user(
@@ -1115,6 +1176,8 @@ async def register_agent(req: AgentRegister):
         balance=1000.0,  # Starting balance
         api_key_hash=hash_api_key(api_key),
         description=req.description or "",
+        status="pending",
+        verification_code=verification_code,
     )
     
     # Update display name if provided
@@ -1122,13 +1185,16 @@ async def register_agent(req: AgentRegister):
         db.update_user_display_name(user_id, req.display_name)
         user["display_name"] = req.display_name
     
-    return AgentRegistered(
+    return AgentRegisteredWithClaim(
         user_id=user["id"],
         username=user["username"],
         display_name=user["display_name"],
         api_key=api_key,  # Only time we return the raw key!
         balance=user["balance"],
         created_at=user["created_at"],
+        status=AgentStatus.PENDING,
+        verification_code=verification_code,
+        claim_url=f"/claim/{user_id}",
     )
 
 
@@ -1145,6 +1211,82 @@ async def reset_api_key(user: dict = Depends(get_current_user)):
     return AgentKeyReset(
         user_id=user["id"],
         api_key=new_key,
+    )
+
+
+@app.get("/claim/{user_id}", response_model=ClaimPageInfo)
+async def get_claim_info(user_id: str):
+    """
+    Get claim page info for an agent (public, no auth required).
+    
+    Returns the verification code and instructions for claiming.
+    """
+    user = db.get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    if not user.get("verification_code"):
+        raise HTTPException(status_code=400, detail="Agent has no verification code")
+    
+    if user.get("status") == "claimed":
+        raise HTTPException(status_code=400, detail="Agent already claimed")
+    
+    instructions = (
+        f"To claim this agent, post a tweet containing the verification code: {user['verification_code']}\n\n"
+        f"Example tweet: 'I'm claiming my MoltMarkets agent! Verification: {user['verification_code']}'\n\n"
+        f"After posting, submit the tweet URL to complete the claim."
+    )
+    
+    return ClaimPageInfo(
+        user_id=user["id"],
+        username=user["username"],
+        display_name=user["display_name"],
+        verification_code=user["verification_code"],
+        instructions=instructions,
+    )
+
+
+@app.post("/agents/claim", response_model=ClaimResponse)
+async def claim_agent(req: ClaimRequest):
+    """
+    Claim an agent by providing a tweet URL with the verification code.
+    
+    The tweet must contain the agent's verification code.
+    """
+    # Get the user/agent
+    user = db.get_user(req.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    if user.get("status") == "claimed":
+        raise HTTPException(status_code=400, detail="Agent already claimed")
+    
+    if not user.get("verification_code"):
+        raise HTTPException(status_code=400, detail="Agent has no verification code")
+    
+    # Validate tweet URL format
+    if not is_valid_twitter_url(req.tweet_url):
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid tweet URL. Must be a twitter.com or x.com status URL (e.g., https://twitter.com/user/status/123456)"
+        )
+    
+    # TODO: Implement actual Twitter API verification
+    # - Fetch the tweet content using Twitter API
+    # - Verify the tweet contains the verification_code
+    # - Optionally verify tweet author matches some criteria
+    # For now, we just validate the URL format and trust the claim
+    
+    # Mark agent as claimed
+    db.update_user_status(req.user_id, "claimed")
+    
+    return ClaimResponse(
+        success=True,
+        message=f"Agent '{user['username']}' successfully claimed!",
+        user_id=user["id"],
+        username=user["username"],
+        display_name=user["display_name"],
+        status=AgentStatus.CLAIMED,
     )
 
 
