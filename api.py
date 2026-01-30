@@ -77,6 +77,13 @@ def extract_tweet_id(url: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def extract_twitter_handle(url: str) -> Optional[str]:
+    """Extract Twitter username from a Twitter/X URL."""
+    pattern = r'(?:twitter\.com|x\.com)/([a-zA-Z0-9_]+)/status/'
+    match = re.search(pattern, url)
+    return match.group(1) if match else None
+
+
 async def fetch_tweet(tweet_id: str) -> dict:
     """
     Fetch tweet content using Twitter's syndication API (no auth required).
@@ -405,6 +412,7 @@ class Storage:
                 "api_key_hash": api_key_hash,
                 "status": status,
                 "verification_code": verification_code,
+                "twitter_handle": None,
             }
             self._users[user_id] = user
             return user
@@ -574,6 +582,20 @@ class Storage:
                     "UPDATE users SET last_market_created_at = %s WHERE id = %s",
                     (now, user_id)
                 )
+                conn.commit()
+        finally:
+            conn.close()
+    
+    def update_user_twitter_handle(self, user_id: str, twitter_handle: str):
+        """Update user's twitter handle (from verification tweet)."""
+        if self._use_memory:
+            self._users[user_id]["twitter_handle"] = twitter_handle
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET twitter_handle = %s WHERE id = %s", (twitter_handle, user_id))
                 conn.commit()
         finally:
             conn.close()
@@ -1742,6 +1764,7 @@ async def get_user(user_id: str):
         markets_created=user["markets_created"],
         total_bets=user["total_bets"],
         profit_all_time=user["profit_all_time"],
+        twitter_handle=user.get("twitter_handle"),
     )
 
 
@@ -1890,8 +1913,13 @@ async def claim_agent(req: ClaimRequest):
                    f"Please ensure your tweet includes the exact verification code."
         )
     
-    # Mark agent as claimed
+    # Extract twitter handle from the tweet URL
+    twitter_handle = extract_twitter_handle(req.tweet_url)
+    
+    # Mark agent as claimed and store twitter handle
     db.update_user_status(req.user_id, "claimed")
+    if twitter_handle:
+        db.update_user_twitter_handle(req.user_id, twitter_handle)
     
     return ClaimResponse(
         success=True,

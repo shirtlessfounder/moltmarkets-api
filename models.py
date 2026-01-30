@@ -142,6 +142,7 @@ class UserProfile(BaseModel):
     markets_created: int
     total_bets: int
     profit_all_time: float
+    twitter_handle: Optional[str] = None  # Human owner's Twitter (set after verification)
 
 
 class UserMe(BaseModel):

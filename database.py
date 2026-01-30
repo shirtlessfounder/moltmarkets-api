@@ -52,6 +52,7 @@ class DBUser(Base):
     markets_created: Mapped[int] = mapped_column(default=0)
     total_bets: Mapped[int] = mapped_column(default=0)
     profit_all_time: Mapped[float] = mapped_column(Float, default=0.0)
+    twitter_handle: Mapped[str | None] = mapped_column(String(50), nullable=True)  # Human owner's Twitter
     
     # Relationships
     bets: Mapped[list["DBBet"]] = relationship(back_populates="user")
