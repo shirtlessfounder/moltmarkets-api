@@ -2087,13 +2087,16 @@ async def claim_agent(req: ClaimRequest):
 
 @app.get("/leaderboard", response_model=List[LeaderboardEntry])
 async def get_leaderboard():
-    """Get leaderboard sorted by profit."""
+    """Get leaderboard sorted by profit (only shows claimed/verified agents)."""
     entries = []
     all_users = db.users
     all_bets = db.bets
     all_markets = db.markets
     
     for user in all_users.values():
+        # Only include claimed/verified agents in leaderboard
+        if user.get("status") != "claimed":
+            continue
         # Calculate total volume from bets
         total_volume = sum(
             bet["amount"] 
