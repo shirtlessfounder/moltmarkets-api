@@ -103,7 +103,7 @@ class BetRequest(BaseModel):
 
 
 class BetResponse(BaseModel):
-    """Result of placing a bet."""
+    """Result of placing a bet. Amounts are in points (ŧ)."""
     bet_id: str
     market_id: str
     user_id: str
@@ -114,6 +114,7 @@ class BetResponse(BaseModel):
     probability_before: float
     probability_after: float
     created_at: datetime
+    currency: str = "ŧ"  # Points symbol — not real money
 
 
 class SellRequest(BaseModel):
@@ -123,7 +124,7 @@ class SellRequest(BaseModel):
 
 
 class SellResponse(BaseModel):
-    """Result of selling shares."""
+    """Result of selling shares. Amounts are in points (ŧ)."""
     market_id: str
     user_id: str
     outcome: Outcome
@@ -132,10 +133,11 @@ class SellResponse(BaseModel):
     fee_paid: float
     probability_before: float
     probability_after: float
+    currency: str = "ŧ"  # Points symbol — not real money
 
 
 class Position(BaseModel):
-    """User's position in a market."""
+    """User's position in a market. Amounts are in points (ŧ)."""
     user_id: str
     market_id: str
     yes_shares: float
@@ -143,6 +145,7 @@ class Position(BaseModel):
     total_invested: float
     current_value: float
     pnl: float
+    currency: str = "ŧ"  # Points symbol — not real money
 
 
 class MarketPositions(BaseModel):
@@ -168,11 +171,12 @@ class UserProfile(BaseModel):
 
 
 class UserMe(BaseModel):
-    """Full profile for authenticated user."""
+    """Full profile for authenticated user. Balance is in points (ŧ), not real money."""
     id: str
     username: str
     display_name: str
     balance: float
+    currency: str = "ŧ"  # Points symbol — not real money
     created_at: datetime
     markets_created: int
     total_bets: int
@@ -180,12 +184,13 @@ class UserMe(BaseModel):
 
 
 class LeaderboardEntry(BaseModel):
-    """Entry in the leaderboard."""
+    """Entry in the leaderboard. All amounts are in points (ŧ)."""
     user_id: str
     username: str
     pnl: float
     total_volume: float
     win_rate: float
+    currency: str = "ŧ"  # Points symbol — not real money
 
 
 class ProbabilityPoint(BaseModel):
@@ -202,7 +207,7 @@ class MarketHistory(BaseModel):
 
 
 class BetHistoryItem(BaseModel):
-    """Single bet in history."""
+    """Single bet in history. Amount is in points (ŧ)."""
     bet_id: str
     user_id: str
     username: str
@@ -211,6 +216,7 @@ class BetHistoryItem(BaseModel):
     shares: float
     probability_after: float
     created_at: datetime
+    currency: str = "ŧ"  # Points symbol — not real money
 
 
 # =============================================================================
@@ -230,22 +236,24 @@ class AgentRegister(BaseModel):
 
 
 class AgentRegistered(BaseModel):
-    """Response after registering an agent."""
+    """Response after registering an agent. Balance is in points (ŧ)."""
     user_id: str
     username: str
     display_name: str
     api_key: str  # Only returned once on registration!
     balance: float
+    currency: str = "ŧ"  # Points symbol — not real money
     created_at: datetime
 
 
 class AgentRegisteredWithClaim(BaseModel):
-    """Response after registering an agent (includes claim info)."""
+    """Response after registering an agent (includes claim info). Balance is in points (ŧ)."""
     user_id: str
     username: str
     display_name: str
     api_key: str  # Only returned once on registration!
     balance: float
+    currency: str = "ŧ"  # Points symbol — not real money
     created_at: datetime
     status: AgentStatus
     verification_code: str  # e.g., "crab-A1B2"
