@@ -327,7 +327,12 @@ class TestSellPosition:
 # ===================================================================
 
 class TestResolveMarket:
-    """POST /markets/{id}/resolve — payouts to winners."""
+    """POST /markets/{id}/resolve — payouts to winners.
+
+    Issue #115: resolving an OPEN market with multiple traders now forms
+    a committee and returns 403 to start the committee vote window.
+    These tests expire the deadline so the creator can resolve immediately.
+    """
 
     def _setup_market_with_bets(self, client):
         """Helper: create a market, place opposing bets, return context."""
@@ -353,13 +358,31 @@ class TestResolveMarket:
             "market_id": market_id,
         }
 
+    def _initiate_and_force_resolve(self, client, market_id, creator_headers, outcome):
+        """Initiate resolution (forms committee), expire deadline, then resolve.
+
+        Issue #115: resolving an OPEN market with traders first forms a
+        committee (returns 403). We expire the deadline so the second
+        resolve call goes through immediately.
+        """
+        resp = client.post(f"/markets/{market_id}/resolve", json={
+            "outcome": outcome,
+        }, headers=creator_headers)
+        if resp.status_code == 403:
+            # Committee window active — expire it
+            m = db._markets[market_id]
+            m["resolution_deadline"] = datetime.now(timezone.utc) - timedelta(minutes=1)
+            resp = client.post(f"/markets/{market_id}/resolve", json={
+                "outcome": outcome,
+            }, headers=creator_headers)
+        return resp
+
     def test_resolve_yes_pays_yes_holders(self, client):
         ctx = self._setup_market_with_bets(client)
         yes_bal_before = client.get("/me", headers=ctx["yes_bettor"]["headers"]).json()["balance"]
 
-        resp = client.post(f"/markets/{ctx['market_id']}/resolve", json={
-            "outcome": "YES",
-        }, headers=ctx["creator"]["headers"])
+        resp = self._initiate_and_force_resolve(
+            client, ctx["market_id"], ctx["creator"]["headers"], "YES")
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "RESOLVED"
@@ -372,9 +395,8 @@ class TestResolveMarket:
         ctx = self._setup_market_with_bets(client)
         no_bal_before = client.get("/me", headers=ctx["no_bettor"]["headers"]).json()["balance"]
 
-        resp = client.post(f"/markets/{ctx['market_id']}/resolve", json={
-            "outcome": "NO",
-        }, headers=ctx["creator"]["headers"])
+        resp = self._initiate_and_force_resolve(
+            client, ctx["market_id"], ctx["creator"]["headers"], "NO")
         assert resp.status_code == 200
 
         no_bal_after = client.get("/me", headers=ctx["no_bettor"]["headers"]).json()["balance"]
@@ -384,18 +406,16 @@ class TestResolveMarket:
         ctx = self._setup_market_with_bets(client)
         no_bal_before = client.get("/me", headers=ctx["no_bettor"]["headers"]).json()["balance"]
 
-        client.post(f"/markets/{ctx['market_id']}/resolve", json={
-            "outcome": "YES",
-        }, headers=ctx["creator"]["headers"])
+        self._initiate_and_force_resolve(
+            client, ctx["market_id"], ctx["creator"]["headers"], "YES")
 
         no_bal_after = client.get("/me", headers=ctx["no_bettor"]["headers"]).json()["balance"]
         assert no_bal_after == pytest.approx(no_bal_before, abs=0.01), "Loser balance should not change"
 
     def test_resolve_twice_fails(self, client):
         ctx = self._setup_market_with_bets(client)
-        client.post(f"/markets/{ctx['market_id']}/resolve", json={
-            "outcome": "YES",
-        }, headers=ctx["creator"]["headers"])
+        self._initiate_and_force_resolve(
+            client, ctx["market_id"], ctx["creator"]["headers"], "YES")
 
         resp = client.post(f"/markets/{ctx['market_id']}/resolve", json={
             "outcome": "NO",
@@ -433,16 +453,64 @@ class TestEdgeCases:
         }, headers=bettor["headers"])
         assert resp.status_code == 400
 
-    def test_bet_on_expired_market(self, client):
-        """Market whose closes_at is in the past should auto-transition."""
+    def test_bet_after_event_end_time(self, client):
+        """Market past closes_at is still tradeable (issue #115).
+
+        closes_at is display-only ('event end time'). Trading continues
+        until the creator explicitly resolves the market.
+        """
         creator = _register_agent(client, "edge_creator2")
-        # Create with very short window then fast-forward close time
         market = _create_market(client, creator["headers"], minutes=30)
         market_id = market["id"]
-        # Manually set closes_at to the past in storage
+        # Move closes_at into the past — trading should still work
         db._markets[market_id]["closes_at"] = datetime.now(timezone.utc) - timedelta(hours=1)
 
         bettor = _register_agent(client, "edge_bettor2")
+        resp = client.post(f"/markets/{market_id}/bet", json={
+            "outcome": "YES", "amount": 10,
+        }, headers=bettor["headers"])
+        assert resp.status_code == 200, "Trading should work after event end time"
+
+    def test_sell_after_event_end_time(self, client):
+        """Selling works after closes_at (issue #115)."""
+        creator = _register_agent(client, "sell_after_close_creator")
+        market = _create_market(client, creator["headers"])
+        market_id = market["id"]
+
+        trader = _register_agent(client, "sell_after_close_trader")
+        buy = client.post(f"/markets/{market_id}/bet", json={
+            "outcome": "YES", "amount": 50,
+        }, headers=trader["headers"]).json()
+
+        # Move closes_at into the past
+        db._markets[market_id]["closes_at"] = datetime.now(timezone.utc) - timedelta(hours=1)
+
+        resp = client.post(f"/markets/{market_id}/sell", json={
+            "outcome": "YES", "shares": buy["shares"],
+        }, headers=trader["headers"])
+        assert resp.status_code == 200, "Sell should work after event end time"
+
+    def test_only_resolution_stops_trading(self, client):
+        """Only resolution stops trading, not closes_at (issue #115)."""
+        creator = _register_agent(client, "only_res_creator")
+        market = _create_market(client, creator["headers"])
+        market_id = market["id"]
+
+        bettor = _register_agent(client, "only_res_bettor")
+
+        # Move closes_at into the past — trading should still work
+        db._markets[market_id]["closes_at"] = datetime.now(timezone.utc) - timedelta(hours=1)
+        resp = client.post(f"/markets/{market_id}/bet", json={
+            "outcome": "YES", "amount": 10,
+        }, headers=bettor["headers"])
+        assert resp.status_code == 200
+
+        # Now resolve the market
+        client.post(f"/markets/{market_id}/resolve", json={
+            "outcome": "YES",
+        }, headers=creator["headers"])
+
+        # Trading should now fail
         resp = client.post(f"/markets/{market_id}/bet", json={
             "outcome": "YES", "amount": 10,
         }, headers=bettor["headers"])

@@ -4,7 +4,6 @@ Trading endpoints — bet, sell, positions, bet history.
 
 import logging
 import uuid
-from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Response
@@ -12,7 +11,7 @@ from fastapi import APIRouter, Depends, Response
 from auth import require_auth
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability
 from deps import (
-    get_db, validate_uuid, clamp_pagination, maybe_transition_market,
+    get_db, validate_uuid, clamp_pagination,
     TRADE_FEE_RATE, CREATOR_FEE_SHARE,
 )
 from errors import error_response, ErrorCode
@@ -71,15 +70,16 @@ async def place_bet(market_id: str, req: BetRequest, response: Response, user: d
     if not market:
         return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
 
-    maybe_transition_market(market, market_id)
-
+    # Markets remain tradeable until resolution (issue #115).
+    # closes_at is display-only; only RESOLVING/RESOLVED blocks trading.
     if market["status"] != MarketStatus.OPEN:
-        status_msg = "Market is resolving (closed, awaiting resolution)" if market["status"] == MarketStatus.RESOLVING else "Market is not open for trading"
+        if market["status"] == MarketStatus.RESOLVING:
+            status_msg = "Market is being resolved — trading is suspended"
+        elif market["status"] == MarketStatus.RESOLVED:
+            status_msg = "Market has been resolved"
+        else:
+            status_msg = "Market is not open for trading"
         return error_response(400, status_msg, ErrorCode.MARKET_CLOSED)
-
-    now = datetime.now(timezone.utc)
-    if market["closes_at"] <= now:
-        return error_response(400, "Market has closed", ErrorCode.MARKET_CLOSED)
 
     trade_fee = req.amount * TRADE_FEE_RATE
     total_cost = req.amount + trade_fee
@@ -197,15 +197,15 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
     if not market:
         return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
 
-    maybe_transition_market(market, market_id)
-
+    # Markets remain tradeable until resolution (issue #115).
     if market["status"] != MarketStatus.OPEN:
-        status_msg = "Market is resolving (closed, awaiting resolution)" if market["status"] == MarketStatus.RESOLVING else "Market is not open for trading"
+        if market["status"] == MarketStatus.RESOLVING:
+            status_msg = "Market is being resolved — trading is suspended"
+        elif market["status"] == MarketStatus.RESOLVED:
+            status_msg = "Market has been resolved"
+        else:
+            status_msg = "Market is not open for trading"
         return error_response(400, status_msg, ErrorCode.MARKET_CLOSED)
-
-    now = datetime.now(timezone.utc)
-    if market["closes_at"] <= now:
-        return error_response(400, "Market has closed", ErrorCode.MARKET_CLOSED)
 
     position = db.get_position(market_id, user["id"])
     if not position:

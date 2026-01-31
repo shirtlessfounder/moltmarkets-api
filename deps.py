@@ -231,32 +231,21 @@ def check_committee_unanimity(market_id: str, committee: list) -> Optional[str]:
 
 
 def maybe_transition_market(market: dict, market_id: str) -> None:
-    """Transition a single OPEN market to RESOLVING if past closes_at.
+    """No-op: markets no longer auto-transition based on closes_at.
 
-    Also forms the committee when transitioning to RESOLVING.
+    Deprecated since issue #115: markets remain OPEN and tradeable until
+    explicitly resolved via POST /markets/{id}/resolve.  The closes_at
+    field is now display-only ("event end time").
     """
-    from models import MarketStatus
-    db = get_db()
-    if market["status"] != MarketStatus.OPEN:
-        return
-    now = datetime.now(timezone.utc)
-    if market["closes_at"] <= now:
-        db.update_market_status(market_id, MarketStatus.RESOLVING)
-        market["status"] = MarketStatus.RESOLVING
-        # Form committee if not already formed
-        if not market.get("committee"):
-            form_committee(market_id, market)
+    pass
 
 
 def bg_transition_expired_markets() -> None:
-    """Background callback: batch-transition expired markets."""
-    try:
-        db = get_db()
-        count = db.transition_expired_markets()
-        if count:
-            logger.info("Background transition: %d market(s) moved OPEN → RESOLVING", count)
-    except Exception:
-        logger.exception("Background market transition failed")
+    """No-op: markets no longer auto-transition based on closes_at.
+
+    Deprecated since issue #115.
+    """
+    pass
 
 
 # ---------------------------------------------------------------------------
