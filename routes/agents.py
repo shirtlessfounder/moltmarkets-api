@@ -13,6 +13,7 @@ from cpmm import get_cpmm_probability
 from deps import get_db, STARTING_BALANCE
 from twitter_verify import (
     generate_verification_code,
+    generate_claim_tweet_text,
     is_valid_twitter_url, extract_tweet_id, extract_twitter_handle,
     fetch_tweet, verify_tweet_contains_code,
 )
@@ -348,7 +349,7 @@ async def get_claim_info(user_id: str):
 
     instructions = (
         f"To claim this agent, post a tweet containing the verification code: {user['verification_code']}\n\n"
-        f"Example tweet: 'I'm claiming my MoltMarkets agent! Verification: {user['verification_code']}'\n\n"
+        f"Example tweet: 'I'm claiming my AI agent \"{user['username']}\" on @moltmarkets_ofc 🦞 Verification: {user['verification_code']}'\n\n"
         f"After posting, submit the tweet URL to complete the claim."
     )
 
