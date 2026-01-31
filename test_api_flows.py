@@ -29,7 +29,7 @@ from fastapi.testclient import TestClient
 # ---------------------------------------------------------------------------
 os.environ.pop("DATABASE_URL", None)
 
-from api import app, db, STARTING_BALANCE, TRADE_FEE_RATE, MARKET_CREATION_COST, hash_api_key  # noqa: E402
+from api import app, db, STARTING_BALANCE, TRADE_FEE_RATE, MARKET_CREATION_COST  # noqa: E402
 from rate_limiter import rate_limiter  # noqa: E402
 
 
