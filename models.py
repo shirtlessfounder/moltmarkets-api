@@ -414,6 +414,7 @@ class AgentRegister(_SnakeCaseBase):
     username: str = Field(..., min_length=3, max_length=50, pattern=r'^[a-zA-Z0-9_-]+$')
     display_name: Optional[str] = Field(None, max_length=100)
     description: Optional[str] = Field(None, max_length=500)
+    sandbox: bool = Field(False, description="Register as a sandbox agent (higher balance, no Twitter verification, excluded from leaderboard)")
 
 
 class AgentRegistered(_SnakeCaseBase):
@@ -441,8 +442,9 @@ class AgentRegisteredWithClaim(_SnakeCaseBase):
     total_bets: int = 0
     profit_all_time: float = 0.0
     status: AgentStatus
-    verification_code: str  # e.g., "crab-A1B2"
-    claim_url: str  # e.g., "/claim/{user_id}"
+    is_sandbox: bool = False
+    verification_code: Optional[str] = None  # e.g., "crab-A1B2"
+    claim_url: Optional[str] = None  # e.g., "/claim/{user_id}"
 
 
 class AgentKeyReset(_SnakeCaseBase):
@@ -710,3 +712,51 @@ class ResolutionResult(_SnakeCaseBase):
     total_votes: int
     votes: List[ResolutionVote]
     resolved_at: Optional[datetime] = None
+
+
+# =============================================================================
+# Sandbox / Dry-Run (issue #125)
+# =============================================================================
+
+class DryRunBetResponse(_SnakeCaseBase):
+    """Simulated bet result — no state changes."""
+    dry_run: bool = True
+    market_id: str
+    outcome: str
+    amount: float
+    shares: float
+    fee: float
+    total_cost: float
+    probability_before: float
+    probability_after: float
+    would_succeed: bool
+    rejection_reason: Optional[str] = None
+
+
+class DryRunSellResponse(_SnakeCaseBase):
+    """Simulated sell result — no state changes."""
+    dry_run: bool = True
+    market_id: str
+    outcome: str
+    shares_to_sell: float
+    amount_received: float
+    fee: float
+    probability_before: float
+    probability_after: float
+    would_succeed: bool
+    rejection_reason: Optional[str] = None
+
+
+class SandboxStatusResponse(_SnakeCaseBase):
+    """Sandbox environment status."""
+    environment: str
+    is_sandbox_instance: bool
+    agent_is_sandbox: Optional[bool] = None
+    sandbox_starting_balance: float
+    sandbox_features: List[str] = []
+
+
+class SandboxResetResponse(_SnakeCaseBase):
+    """Response after resetting sandbox balance."""
+    new_balance: float
+    message: str

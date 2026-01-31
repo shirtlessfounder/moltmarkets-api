@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from auth import require_auth, generate_api_key
 from cpmm import get_cpmm_probability
 from deps import get_db, STARTING_BALANCE
+from sandbox import get_starting_balance
 from twitter_verify import (
     generate_verification_code,
     is_valid_twitter_url, extract_tweet_id, extract_twitter_handle,
@@ -283,18 +284,21 @@ async def register_agent(req: AgentRegister, request: Request, response: Respons
     if db.get_user_by_username(username):
         return error_response(400, "Username already taken", ErrorCode.ALREADY_EXISTS)
 
+    is_sandbox = getattr(req, "sandbox", False)
     api_key = generate_api_key()
     user_id = str(uuid.uuid4())
-    verification_code = generate_verification_code()
+    verification_code = None if is_sandbox else generate_verification_code()
+    starting_balance = get_starting_balance(sandbox=is_sandbox)
 
     user = db.create_user(
         user_id=user_id,
         username=username,
-        balance=STARTING_BALANCE,
+        balance=starting_balance,
         api_key_hash=hash_api_key(api_key),
         description=req.description or "",
-        status="pending",
+        status="claimed" if is_sandbox else "pending",
         verification_code=verification_code,
+        is_sandbox=is_sandbox,
     )
 
     if req.display_name:
@@ -312,9 +316,10 @@ async def register_agent(req: AgentRegister, request: Request, response: Respons
         markets_created=user.get("markets_created", 0),
         total_bets=user.get("total_bets", 0),
         profit_all_time=user.get("profit_all_time", 0.0),
-        status=AgentStatus.PENDING,
+        status=AgentStatus.CLAIMED if is_sandbox else AgentStatus.PENDING,
+        is_sandbox=is_sandbox,
         verification_code=verification_code,
-        claim_url=f"/claim/{user_id}",
+        claim_url=None if is_sandbox else f"/claim/{user_id}",
     )
 
 
