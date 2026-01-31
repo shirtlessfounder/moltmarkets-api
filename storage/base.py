@@ -5,6 +5,7 @@ Contains Storage.__init__, connection pool, _init_db, _save, and constants.
 """
 
 import json
+import logging
 import os
 import warnings
 from datetime import datetime, timezone
@@ -16,6 +17,8 @@ from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 
 from models import MarketStatus, Outcome
+
+logger = logging.getLogger(__name__)
 
 
 class BaseStorage:
@@ -33,7 +36,7 @@ class BaseStorage:
             self._init_pool()
             self._init_db()
         else:
-            print("Warning: DATABASE_URL not set, using in-memory storage (data will be lost on restart)")
+            logger.warning("DATABASE_URL not set, using in-memory storage (data will be lost on restart)")
             # Fallback to in-memory for local dev without DB
             self._use_memory = True
             self._markets: Dict[str, dict] = {}
@@ -50,9 +53,9 @@ class BaseStorage:
         if self._pool is not None:
             try:
                 self._pool.closeall()
-                print("Connection pool closed")
+                logger.info("Connection pool closed")
             except Exception as e:
-                print(f"Warning: error closing connection pool: {e}")
+                logger.warning("Error closing connection pool: %s", e)
 
     def _init_pool(self):
         """Initialize a thread-safe connection pool.
@@ -90,7 +93,7 @@ class BaseStorage:
             keepalives_count=3,          # Give up after 3 missed keepalives
             options='-c statement_timeout=30000',  # 30s query timeout
         )
-        print(f"ThreadedConnectionPool initialized (min={min_conn}, max={max_conn}, keepalives=on, statement_timeout=30s)")
+        logger.info("ThreadedConnectionPool initialized (min=%d, max=%d, keepalives=on, statement_timeout=30s)", min_conn, max_conn)
 
     def _get_conn(self):
         """Get a database connection from the pool.
@@ -352,7 +355,7 @@ class BaseStorage:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_created_at ON markets(created_at DESC)")
 
                 conn.commit()
-                print("Database tables initialized")
+                logger.info("Database tables initialized")
         finally:
             self._put_conn(conn)
 

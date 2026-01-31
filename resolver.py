@@ -7,10 +7,13 @@ Majority (5+) decides the outcome.
 
 import asyncio
 import httpx
+import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 import json
+
+logger = logging.getLogger(__name__)
 
 # Configuration
 NUM_RESOLVERS = 9
@@ -49,7 +52,7 @@ async def web_search(query: str, api_key: str, num_results: int = 5) -> List[Dic
                 })
             return results
     except Exception as e:
-        print(f"Search error: {e}")
+        logger.error("Search error: %s", e)
         return []
 
 
@@ -120,7 +123,7 @@ Respond in this exact JSON format:
             )
             
             if response.status_code != 200:
-                print(f"Agent {agent_id} API error: {response.status_code}")
+                logger.error("Agent %s API error: %d", agent_id, response.status_code)
                 return None
             
             data = response.json()
@@ -145,11 +148,11 @@ Respond in this exact JSON format:
                             created_at=datetime.now(timezone.utc)
                         )
             except json.JSONDecodeError:
-                print(f"Agent {agent_id} JSON parse error")
+                logger.error("Agent %s JSON parse error", agent_id)
                 return None
                 
     except Exception as e:
-        print(f"Agent {agent_id} error: {e}")
+        logger.error("Agent %s error: %s", agent_id, e)
         return None
     
     return None

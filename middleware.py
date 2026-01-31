@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from errors import APIError, ErrorCode
 from idempotency import IdempotencyMiddleware
+from logger import RequestIDMiddleware, RequestLoggingMiddleware
 
 
 # ---------------------------------------------------------------------------
@@ -109,3 +110,12 @@ def configure_middleware(app: FastAPI) -> None:
     # Idempotency middleware — must be added AFTER CORSMiddleware so CORS
     # headers are applied even to cached/replayed responses.
     app.add_middleware(IdempotencyMiddleware)
+
+    # Request logging middleware — logs request/response with timing.
+    # Added after IdempotencyMiddleware so it captures all requests including
+    # idempotent replays.
+    app.add_middleware(RequestLoggingMiddleware)
+
+    # Request ID middleware — outermost, ensures every request gets a
+    # correlation ID available to all inner middleware and route handlers.
+    app.add_middleware(RequestIDMiddleware)
