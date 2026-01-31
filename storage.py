@@ -203,8 +203,19 @@ class Storage:
                         creator_id VARCHAR(255) REFERENCES users(id),
                         pool_yes DECIMAL(20, 8) DEFAULT 100.0,
                         pool_no DECIMAL(20, 8) DEFAULT 100.0,
-                        p DECIMAL(10, 8) DEFAULT 0.5
+                        p DECIMAL(10, 8) DEFAULT 0.5,
+                        version INTEGER NOT NULL DEFAULT 1
                     )
+                """)
+
+                # Add version column if missing (existing databases — see migration 005)
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='markets' AND column_name='version') THEN
+                            ALTER TABLE markets ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+                        END IF;
+                    END $$;
                 """)
                 
                 # Bets table
@@ -353,6 +364,7 @@ class Storage:
             "creator_id": row["creator_id"],
             "pool": {"YES": float(row["pool_yes"]), "NO": float(row["pool_no"])},
             "p": float(row["p"]),
+            "version": int(row.get("version", 1)),
         }
     
     def _row_to_bet(self, row: dict) -> dict:
@@ -897,6 +909,7 @@ class Storage:
                 "creator_id": creator_id,
                 "pool": pool,
                 "p": 0.5,
+                "version": 1,
             }
             self._markets[market_id] = market
             self._positions[market_id] = {}
@@ -940,6 +953,97 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    def update_market_pool_versioned(
+        self,
+        market_id: str,
+        new_pool: dict,
+        new_p: float,
+        volume_delta: float,
+        expected_version: int,
+    ) -> Optional[int]:
+        """Compare-and-swap pool update with optimistic locking.
+
+        Atomically sets new pool values **only** when the current row
+        version matches ``expected_version``.  On success the version is
+        incremented and the new version number is returned.  On conflict
+        (another writer incremented the version first) returns ``None``
+        so the caller can retry with fresh state.
+        """
+        if self._use_memory:
+            market = self._markets.get(market_id)
+            if not market or market.get("version", 1) != expected_version:
+                return None
+            market["pool"] = new_pool
+            market["p"] = new_p
+            market["total_volume"] += volume_delta
+            market["version"] = expected_version + 1
+            return expected_version + 1
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE markets
+                    SET pool_yes = %s,
+                        pool_no  = %s,
+                        p        = %s,
+                        total_volume = total_volume + %s,
+                        version  = version + 1
+                    WHERE id = %s AND version = %s
+                    RETURNING version
+                """, (
+                    new_pool["YES"], new_pool["NO"], new_p,
+                    volume_delta, market_id, expected_version,
+                ))
+                row = cur.fetchone()
+                conn.commit()
+                return int(row["version"]) if row else None
+        finally:
+            self._put_conn(conn)
+
+    def resolve_market_versioned(
+        self,
+        market_id: str,
+        outcome: Outcome,
+        expected_version: int,
+    ) -> Optional[int]:
+        """Resolve a market with optimistic locking.
+
+        Returns the new version on success, ``None`` on version conflict.
+        """
+        now = datetime.now(timezone.utc)
+
+        if self._use_memory:
+            market = self._markets.get(market_id)
+            if not market or market.get("version", 1) != expected_version:
+                return None
+            market["status"] = MarketStatus.RESOLVED
+            market["resolution"] = outcome
+            market["resolved_at"] = now
+            market["version"] = expected_version + 1
+            return expected_version + 1
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE markets
+                    SET status      = %s,
+                        resolution  = %s,
+                        resolved_at = %s,
+                        version     = version + 1
+                    WHERE id = %s AND version = %s
+                    RETURNING version
+                """, (
+                    MarketStatus.RESOLVED.value, outcome.value, now,
+                    market_id, expected_version,
+                ))
+                row = cur.fetchone()
+                conn.commit()
+                return int(row["version"]) if row else None
+        finally:
+            self._put_conn(conn)
+
     def update_market_status(self, market_id: str, status: MarketStatus):
         """Update a market's status (e.g. OPEN → RESOLVING)."""
         if self._use_memory:
