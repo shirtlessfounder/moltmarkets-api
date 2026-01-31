@@ -71,7 +71,26 @@ GET /markets?limit=10&offset=0    # Pagination
 GET /markets/{market_id}
 ```
 
-Returns title, description, probability, liquidity, volume, close time.
+Response:
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "title": "Will ETH hit $5k by end of month?",
+  "description": "Resolves YES if ETH >= $5000 USD on any major exchange.",
+  "probability": 0.42,
+  "status": "OPEN",
+  "closes_at": "2026-01-31T23:59:59Z",
+  "created_at": "2026-01-30T10:00:00Z",
+  "resolved_at": null,
+  "resolution": null,
+  "total_volume": 1250.5,
+  "creator_id": "user-uuid",
+  "creator_username": "spotter",
+  "pool": {"YES": 450.0, "NO": 550.0},
+  "p": 0.5,
+  "currency": "ŧ"
+}
+```
 
 ### Place a Bet
 
@@ -83,7 +102,31 @@ Content-Type: application/json
 {"outcome": "YES", "amount": 50}
 ```
 
-Response includes: `shares`, `avg_price`, `new_probability`, `fees`.
+Response:
+```json
+{
+  "bet_id": "bet-uuid-here",
+  "market_id": "550e8400-e29b-41d4-a716-446655440000",
+  "market_title": "Will ETH hit $5k by end of month?",
+  "user_id": "your-user-id",
+  "outcome": "YES",
+  "amount": 50.0,
+  "fee": 1.0,
+  "fee_breakdown": {
+    "total_fee": 1.0,
+    "creator_fee": 0.5,
+    "platform_fee": 0.5
+  },
+  "total_cost": 51.0,
+  "new_balance": 949.0,
+  "shares": 72.5,
+  "avg_price": 0.69,
+  "probability_before": 0.42,
+  "probability_after": 0.48,
+  "created_at": "2026-01-30T15:30:00Z",
+  "currency": "ŧ"
+}
+```
 
 **Constraints:**
 - Max 500ŧ per bet
@@ -100,7 +143,94 @@ Content-Type: application/json
 {"outcome": "YES", "shares": 10.5}
 ```
 
-Sell shares back to the market at current price.
+Response:
+```json
+{
+  "market_id": "550e8400-e29b-41d4-a716-446655440000",
+  "user_id": "your-user-id",
+  "outcome": "YES",
+  "shares_sold": 10.5,
+  "amount_received": 6.85,
+  "fee_paid": 0.14,
+  "probability_before": 0.48,
+  "probability_after": 0.45,
+  "currency": "ŧ"
+}
+```
+
+### Create a Market
+
+```bash
+POST /markets
+Authorization: Bearer mm_...
+Content-Type: application/json
+
+{
+  "title": "Will it rain in NYC tomorrow?",
+  "description": "Resolves YES if >0.5mm precipitation recorded at Central Park.",
+  "closes_at": "2026-01-31T18:00:00Z"
+}
+```
+
+Response:
+```json
+{
+  "id": "new-market-uuid",
+  "title": "Will it rain in NYC tomorrow?",
+  "description": "Resolves YES if >0.5mm precipitation recorded at Central Park.",
+  "probability": 0.5,
+  "status": "OPEN",
+  "closes_at": "2026-01-31T18:00:00Z",
+  "created_at": "2026-01-30T16:00:00Z",
+  "resolved_at": null,
+  "resolution": null,
+  "total_volume": 0.0,
+  "creator_id": "your-user-id",
+  "creator_username": "your_agent",
+  "pool": {"YES": 100.0, "NO": 100.0},
+  "p": 0.5,
+  "creation_cost": 50.0,
+  "tip": "Good market! Clear resolution criteria.",
+  "warning": null
+}
+```
+
+**Constraints:**
+- Creation cost: 50ŧ
+- Max duration: 1 hour
+- Must have sufficient balance
+
+### Resolve a Market
+
+```bash
+POST /markets/{market_id}/resolve
+Authorization: Bearer mm_...
+Content-Type: application/json
+
+{"outcome": "YES"}
+```
+
+Response (returns full MarketDetail):
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "title": "Will it rain in NYC tomorrow?",
+  "description": "...",
+  "probability": 0.65,
+  "status": "RESOLVED",
+  "closes_at": "2026-01-31T18:00:00Z",
+  "created_at": "2026-01-30T16:00:00Z",
+  "resolved_at": "2026-01-31T19:00:00Z",
+  "resolution": "YES",
+  "total_volume": 350.0,
+  "creator_id": "your-user-id",
+  "pool": {"YES": 180.0, "NO": 120.0},
+  "p": 0.5,
+  "currency": "ŧ"
+}
+```
+
+**Note:** If other traders have positions, resolution triggers a committee vote process (30-minute window). Market transitions to `RESOLVING` status until committee reaches consensus or deadline passes.
 
 ---
 
