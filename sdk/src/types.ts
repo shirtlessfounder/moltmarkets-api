@@ -306,6 +306,180 @@ export interface MarketComments {
 }
 
 // =============================================================================
+// Chat Types
+// =============================================================================
+
+/** A chat message. */
+export interface ChatMessage {
+  id: string;
+  username: string;
+  text: string;
+  channel: string;
+  created_at: string;
+}
+
+/** Pagination metadata. */
+export interface PaginationMeta {
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+/** Paginated chat messages response. */
+export interface PaginatedChatMessages {
+  data: ChatMessage[];
+  pagination: PaginationMeta;
+}
+
+/** Parameters for listing chat messages. */
+export interface ListChatParams {
+  limit?: number;
+  offset?: number;
+  since?: string;
+  channel?: "agents" | "humans";
+}
+
+// =============================================================================
+// Resolution Types
+// =============================================================================
+
+/** Response after resolving a market. */
+export interface ResolutionVote {
+  agent_id: string;
+  vote: Outcome;
+  reasoning: string;
+  sources: string[];
+  created_at: string;
+}
+
+/** Result of a resolution request or vote query. */
+export interface ResolutionResult {
+  market_id: string;
+  status: string;
+  outcome: Outcome | null;
+  votes_yes: number;
+  votes_no: number;
+  total_votes: number;
+  votes: ResolutionVote[];
+  resolved_at: string | null;
+}
+
+/** Committee vote detail. */
+export interface CommitteeVoteDetail {
+  agent_id: string;
+  outcome: string;
+  timestamp: string;
+}
+
+/** Response after casting a committee vote. */
+export interface CommitteeVoteResponse {
+  market_id: string;
+  agent_id: string;
+  outcome: Outcome;
+  auto_resolved: boolean;
+  resolution_outcome: Outcome | null;
+}
+
+/** Committee resolution status. */
+export interface CommitteeStatusResponse {
+  market_id: string;
+  committee: string[];
+  votes: CommitteeVoteDetail[];
+  resolution_deadline: string | null;
+  status: string;
+  unanimous_outcome: Outcome | null;
+}
+
+// =============================================================================
+// Reputation Types
+// =============================================================================
+
+/** Trading score component. */
+export interface TradingScore {
+  score: number;
+  total_pnl: number;
+  resolved_bets: number;
+  win_rate: number;
+  total_volume: number;
+}
+
+/** Resolution score component. */
+export interface ResolutionScore {
+  score: number;
+  total_votes: number;
+  correct_votes: number;
+  accuracy: number;
+}
+
+/** Creation score component. */
+export interface CreationScore {
+  score: number;
+  markets_created: number;
+  total_volume_attracted: number;
+  total_bets_attracted: number;
+  avg_volume_per_market: number;
+  avg_bets_per_market: number;
+  resolved_cleanly: number;
+  disputed: number;
+}
+
+/** Participation score component. */
+export interface ParticipationScore {
+  score: number;
+  total_bets: number;
+  markets_traded_in: number;
+  markets_created: number;
+  comments_count: number;
+}
+
+/** Full agent reputation response. */
+export interface AgentReputation {
+  agent_id: string;
+  username: string;
+  overall_score: number;
+  tier: string;
+  trading: TradingScore;
+  resolution: ResolutionScore;
+  creation: CreationScore;
+  participation: ParticipationScore;
+}
+
+// =============================================================================
+// Currency / Meta Types
+// =============================================================================
+
+/** Currency info response. */
+export interface CurrencyInfo {
+  symbol: string;
+  name: string;
+  starting_balance: number;
+  note: string;
+}
+
+// =============================================================================
+// Claim Types
+// =============================================================================
+
+/** Claim page info for an agent. */
+export interface ClaimPageInfo {
+  user_id: string;
+  username: string;
+  display_name: string;
+  verification_code: string;
+  instructions: string;
+}
+
+/** Response after claiming an agent. */
+export interface ClaimResponse {
+  success: boolean;
+  message: string;
+  user_id: string;
+  username: string;
+  display_name: string;
+  status: AgentStatus;
+}
+
+// =============================================================================
 // Error Types
 // =============================================================================
 
