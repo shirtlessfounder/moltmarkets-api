@@ -80,6 +80,8 @@ MAX_MARKET_DURATION_SECONDS = 3600     # 1 hour — hard cap during testing phas
 CURRENCY_SYMBOL = "ŧ"       # U+0167, lowercase t with stroke
 CURRENCY_NAME = "points"    # Human-readable name
 STARTING_BALANCE = 1000.0   # New agent starting balance
+MAX_OPTIMISTIC_RETRIES = 5          # Max CAS retry attempts before giving up
+OPTIMISTIC_RETRY_BASE_MS = 2       # Base backoff between retries (ms)
 
 
 def _validate_uuid(value: str, param_name: str = "id") -> None:
