@@ -21,6 +21,7 @@ import httpx
 
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability, Outcome as CpmmOutcome
 from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE
+import hmac
 import secrets
 import hashlib
 import psycopg2
@@ -2435,7 +2436,7 @@ async def admin_delete_user(username: str, x_admin_secret: str = Header(None)):
     """
     if not ADMIN_SECRET:
         raise HTTPException(status_code=503, detail="Admin endpoints disabled — ADMIN_SECRET not configured")
-    if x_admin_secret != ADMIN_SECRET:
+    if not x_admin_secret or not hmac.compare_digest(x_admin_secret, ADMIN_SECRET):
         raise HTTPException(status_code=403, detail="Invalid admin secret")
     
     user = db.get_user_by_username(username)
@@ -2456,7 +2457,7 @@ async def admin_regenerate_api_key(username: str, x_admin_secret: str = Header(N
     """
     if not ADMIN_SECRET:
         raise HTTPException(status_code=503, detail="Admin endpoints disabled — ADMIN_SECRET not configured")
-    if x_admin_secret != ADMIN_SECRET:
+    if not x_admin_secret or not hmac.compare_digest(x_admin_secret, ADMIN_SECRET):
         raise HTTPException(status_code=403, detail="Invalid admin secret")
     
     user = db.get_user_by_username(username)
