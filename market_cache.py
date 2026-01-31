@@ -16,7 +16,6 @@ See issue #45 for context.
 """
 
 import hashlib
-import json
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
