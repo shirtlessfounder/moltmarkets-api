@@ -21,6 +21,7 @@ from utils import validate_uuid, clamp_pagination, set_cache_headers
 from errors import error_response, ErrorCode
 from event_bus import event_bus, SSEEvent
 from market_cache import market_cache
+from history_cache import history_cache
 from models import (
     MarketCreate, MarketSummary, MarketDetail, MarketCreated,
     ProbabilityPoint, MarketHistory, SparklinePoint,
@@ -426,9 +427,19 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
 
 @router.get("/markets/{market_id}/history", response_model=MarketHistory)
 async def get_market_history(market_id: str):
-    """Get probability history for charts."""
-    db = get_db()
+    """Get probability history for charts.
+    
+    Cached with invalidation on new bets — history is append-only so
+    cached data is always valid until a new bet is placed.
+    """
     validate_uuid(market_id, "market_id")
+    
+    # Check cache first
+    cached = history_cache.get("history", market_id)
+    if cached:
+        return cached
+    
+    db = get_db()
     market = db.get_market(market_id)
     if not market:
         return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
@@ -453,4 +464,9 @@ async def get_market_history(market_id: str):
             volume=cumulative_volume,
         ))
 
-    return MarketHistory(market_id=market_id, points=points)
+    result = MarketHistory(market_id=market_id, points=points)
+    
+    # Cache for next request
+    history_cache.set("history", market_id, result)
+    
+    return result
