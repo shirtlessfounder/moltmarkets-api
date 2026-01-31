@@ -10,13 +10,13 @@ from fastapi import APIRouter, Depends, Request, Response
 
 from auth import require_auth, generate_api_key
 from cpmm import get_cpmm_probability
-from deps import (
-    get_db, validate_uuid, clamp_pagination,
+from deps import get_db, STARTING_BALANCE
+from twitter_verify import (
     generate_verification_code,
     is_valid_twitter_url, extract_tweet_id, extract_twitter_handle,
     fetch_tweet, verify_tweet_contains_code,
-    STARTING_BALANCE,
 )
+from utils import validate_uuid, clamp_pagination
 from errors import error_response, ErrorCode
 from middleware import set_rate_limit_headers, raise_rate_limited
 from models import (

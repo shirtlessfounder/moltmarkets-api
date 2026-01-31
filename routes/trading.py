@@ -10,10 +10,8 @@ from fastapi import APIRouter, Depends, Response
 
 from auth import require_auth
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability
-from deps import (
-    get_db, validate_uuid, clamp_pagination,
-    TRADE_FEE_RATE, CREATOR_FEE_SHARE,
-)
+from deps import get_db, TRADE_FEE_RATE, CREATOR_FEE_SHARE
+from utils import validate_uuid, clamp_pagination
 from errors import error_response, ErrorCode
 from event_bus import event_bus, SSEEvent
 from market_cache import market_cache

@@ -9,11 +9,10 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 
 from auth import require_auth
-from deps import (
-    get_db, validate_uuid,
-    calculate_and_distribute_payouts,
-    form_committee, check_committee_unanimity,
-)
+from committee import form_committee, check_committee_unanimity
+from deps import get_db
+from payouts import calculate_and_distribute_payouts
+from utils import validate_uuid
 from errors import error_response, ErrorCode
 from event_bus import event_bus, SSEEvent
 from market_cache import market_cache

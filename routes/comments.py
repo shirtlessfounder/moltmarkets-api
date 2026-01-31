@@ -8,7 +8,8 @@ import uuid
 from fastapi import APIRouter, Depends
 
 from auth import require_auth
-from deps import get_db, validate_uuid
+from deps import get_db
+from utils import validate_uuid
 from errors import error_response, ErrorCode
 from event_bus import event_bus, SSEEvent
 from models import CommentCreate, Comment, MarketComments
