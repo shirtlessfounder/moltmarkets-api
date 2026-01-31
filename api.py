@@ -426,6 +426,14 @@ class Storage:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_status ON markets(status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_api_key ON users(api_key_hash)")
                 
+                # Additional indexes for common query patterns (see #50)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_positions_user ON positions(user_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_creator ON markets(creator_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_comments_user ON comments(user_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_closes_at ON markets(closes_at)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users(LOWER(username))")
+                
                 conn.commit()
                 print("Database tables initialized")
         finally:
