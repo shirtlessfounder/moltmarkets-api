@@ -320,6 +320,36 @@ class Storage:
                 # Index on created_at alone for the default ORDER BY
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_created_at ON markets(created_at DESC)")
                 
+                # --- Disputes tables (Issue #8) ---
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS disputes (
+                        id VARCHAR(255) PRIMARY KEY,
+                        market_id VARCHAR(255) REFERENCES markets(id) NOT NULL,
+                        disputer_id VARCHAR(255) REFERENCES users(id) NOT NULL,
+                        reason TEXT NOT NULL,
+                        evidence TEXT DEFAULT '',
+                        original_resolution VARCHAR(50) NOT NULL,
+                        new_resolution VARCHAR(50),
+                        status VARCHAR(50) DEFAULT 'OPEN',
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        resolved_at TIMESTAMP WITH TIME ZONE
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS dispute_votes (
+                        id VARCHAR(255) PRIMARY KEY,
+                        dispute_id VARCHAR(255) REFERENCES disputes(id) NOT NULL,
+                        voter_id VARCHAR(255) REFERENCES users(id) NOT NULL,
+                        vote VARCHAR(20) NOT NULL,
+                        reasoning TEXT DEFAULT '',
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        UNIQUE(dispute_id, voter_id)
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_disputes_market ON disputes(market_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_disputes_status ON disputes(status)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dispute_votes_dispute ON dispute_votes(dispute_id)")
+                
                 conn.commit()
                 print("Database tables initialized")
         finally:
@@ -1695,6 +1725,259 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    # --- Disputes (Issue #8) ---
+
+    def create_dispute(self, dispute_id: str, market_id: str, disputer_id: str,
+                       reason: str, evidence: str, original_resolution: str,
+                       status: str = "OPEN") -> dict:
+        """Create a new dispute against a market resolution."""
+        now = datetime.now(timezone.utc)
+        dispute = {
+            "id": dispute_id,
+            "market_id": market_id,
+            "disputer_id": disputer_id,
+            "reason": reason,
+            "evidence": evidence,
+            "original_resolution": original_resolution,
+            "new_resolution": None,
+            "status": status,
+            "created_at": now,
+            "resolved_at": None,
+        }
+
+        if self._use_memory:
+            if not hasattr(self, '_disputes'):
+                self._disputes = {}
+            self._disputes[dispute_id] = dispute
+            return dispute
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO disputes
+                        (id, market_id, disputer_id, reason, evidence,
+                         original_resolution, status, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                """, (dispute_id, market_id, disputer_id, reason, evidence,
+                      original_resolution, status, now))
+                row = cur.fetchone()
+                conn.commit()
+                return dict(row) if row else dispute
+        finally:
+            self._put_conn(conn)
+
+    def get_dispute(self, dispute_id: str) -> Optional[dict]:
+        """Get a single dispute by ID."""
+        if self._use_memory:
+            if not hasattr(self, '_disputes'):
+                return None
+            return self._disputes.get(dispute_id)
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM disputes WHERE id = %s", (dispute_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+        finally:
+            self._put_conn(conn)
+
+    def get_market_disputes(self, market_id: str) -> List[dict]:
+        """Get all disputes for a market, ordered by creation time (newest first)."""
+        if self._use_memory:
+            if not hasattr(self, '_disputes'):
+                return []
+            return sorted(
+                [d for d in self._disputes.values() if d["market_id"] == market_id],
+                key=lambda x: x["created_at"],
+                reverse=True,
+            )
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT d.*, u.username AS disputer_username
+                    FROM disputes d
+                    JOIN users u ON d.disputer_id = u.id
+                    WHERE d.market_id = %s
+                    ORDER BY d.created_at DESC
+                """, (market_id,))
+                rows = cur.fetchall()
+                return [dict(row) for row in rows]
+        finally:
+            self._put_conn(conn)
+
+    def get_open_dispute_for_market(self, market_id: str) -> Optional[dict]:
+        """Get the currently open/under-review dispute for a market (at most one active)."""
+        if self._use_memory:
+            if not hasattr(self, '_disputes'):
+                return None
+            for d in self._disputes.values():
+                if d["market_id"] == market_id and d["status"] in ("OPEN", "UNDER_REVIEW"):
+                    return d
+            return None
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT * FROM disputes
+                    WHERE market_id = %s AND status IN ('OPEN', 'UNDER_REVIEW')
+                    LIMIT 1
+                """, (market_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+        finally:
+            self._put_conn(conn)
+
+    def update_dispute_status(self, dispute_id: str, status: str,
+                              new_resolution: Optional[str] = None) -> None:
+        """Update a dispute's status and optionally set the new resolution."""
+        now = datetime.now(timezone.utc)
+
+        if self._use_memory:
+            dispute = self._disputes[dispute_id]
+            dispute["status"] = status
+            if new_resolution is not None:
+                dispute["new_resolution"] = new_resolution
+            if status in ("UPHELD", "OVERTURNED"):
+                dispute["resolved_at"] = now
+            return
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                resolved_at = now if status in ("UPHELD", "OVERTURNED") else None
+                cur.execute("""
+                    UPDATE disputes
+                    SET status = %s,
+                        new_resolution = COALESCE(%s, new_resolution),
+                        resolved_at = COALESCE(%s, resolved_at)
+                    WHERE id = %s
+                """, (status, new_resolution, resolved_at, dispute_id))
+                conn.commit()
+        finally:
+            self._put_conn(conn)
+
+    def create_dispute_vote(self, vote_id: str, dispute_id: str,
+                            voter_id: str, vote: str,
+                            reasoning: str = "") -> dict:
+        """Record a vote on a dispute."""
+        now = datetime.now(timezone.utc)
+        vote_record = {
+            "id": vote_id,
+            "dispute_id": dispute_id,
+            "voter_id": voter_id,
+            "vote": vote,
+            "reasoning": reasoning,
+            "created_at": now,
+        }
+
+        if self._use_memory:
+            if not hasattr(self, '_dispute_votes'):
+                self._dispute_votes = {}
+            self._dispute_votes[vote_id] = vote_record
+            return vote_record
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO dispute_votes
+                        (id, dispute_id, voter_id, vote, reasoning, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                """, (vote_id, dispute_id, voter_id, vote, reasoning, now))
+                row = cur.fetchone()
+                conn.commit()
+                return dict(row) if row else vote_record
+        finally:
+            self._put_conn(conn)
+
+    def get_dispute_votes(self, dispute_id: str) -> List[dict]:
+        """Get all votes for a dispute."""
+        if self._use_memory:
+            if not hasattr(self, '_dispute_votes'):
+                return []
+            return sorted(
+                [v for v in self._dispute_votes.values() if v["dispute_id"] == dispute_id],
+                key=lambda x: x["created_at"],
+            )
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT dv.*, u.username AS voter_username
+                    FROM dispute_votes dv
+                    JOIN users u ON dv.voter_id = u.id
+                    WHERE dv.dispute_id = %s
+                    ORDER BY dv.created_at ASC
+                """, (dispute_id,))
+                rows = cur.fetchall()
+                return [dict(row) for row in rows]
+        finally:
+            self._put_conn(conn)
+
+    def has_user_voted_on_dispute(self, dispute_id: str, voter_id: str) -> bool:
+        """Check if a user has already voted on a specific dispute."""
+        if self._use_memory:
+            if not hasattr(self, '_dispute_votes'):
+                return False
+            return any(
+                v["dispute_id"] == dispute_id and v["voter_id"] == voter_id
+                for v in self._dispute_votes.values()
+            )
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 1 FROM dispute_votes
+                    WHERE dispute_id = %s AND voter_id = %s
+                    LIMIT 1
+                """, (dispute_id, voter_id))
+                return cur.fetchone() is not None
+        finally:
+            self._put_conn(conn)
+
+    def user_has_position(self, market_id: str, user_id: str) -> bool:
+        """Check if a user has (or had) a position in a market."""
+        if self._use_memory:
+            key = f"{market_id}:{user_id}"
+            pos = self._positions.get(key)
+            if pos and (pos.get("yes_shares", 0) > 0 or pos.get("no_shares", 0) > 0 or pos.get("total_invested", 0) > 0):
+                return True
+            # Also check bets (positions may be zeroed after resolution payout)
+            for b in self._bets.values():
+                if isinstance(b, dict) and b.get("market_id") == market_id and b.get("user_id") == user_id:
+                    return True
+            return False
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                # Check positions table first
+                cur.execute("""
+                    SELECT 1 FROM positions
+                    WHERE market_id = %s AND user_id = %s
+                    LIMIT 1
+                """, (market_id, user_id))
+                if cur.fetchone():
+                    return True
+                # Also check bets table (user may have traded even if position is zeroed)
+                cur.execute("""
+                    SELECT 1 FROM bets
+                    WHERE market_id = %s AND user_id = %s
+                    LIMIT 1
+                """, (market_id, user_id))
+                return cur.fetchone() is not None
+        finally:
+            self._put_conn(conn)
+
     # --- Utility ---
     
     def _save(self):

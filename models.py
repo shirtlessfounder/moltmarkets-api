@@ -636,3 +636,81 @@ class ResolutionResult(_SnakeCaseBase):
     total_votes: int
     votes: List[ResolutionVote]
     resolved_at: Optional[datetime] = None
+
+
+# =============================================================================
+# Dispute Models (Issue #8)
+# =============================================================================
+
+class DisputeStatus(str, Enum):
+    """Lifecycle of a dispute."""
+    OPEN = "OPEN"                # Filed, awaiting review
+    UNDER_REVIEW = "UNDER_REVIEW"  # Committee / community is reviewing
+    UPHELD = "UPHELD"            # Original resolution stands
+    OVERTURNED = "OVERTURNED"    # Resolution reversed
+
+
+class DisputeCreate(_SnakeCaseBase):
+    """Request to dispute a market resolution.
+
+    Only users who hold (or held) a position in the market may file a dispute.
+    Must be filed within the dispute window (configurable, default 24 hours
+    after resolution).
+    """
+    reason: str = Field(
+        ..., min_length=10, max_length=2000,
+        description="Why the resolution is incorrect",
+    )
+    evidence: str = Field(
+        default="", max_length=5000,
+        description="Supporting evidence (links, screenshots, data)",
+    )
+
+
+class DisputeVoteRequest(_SnakeCaseBase):
+    """Request to cast a vote on a dispute (committee or community vote)."""
+    vote: str = Field(
+        ..., pattern=r'^(UPHOLD|OVERTURN)$',
+        description="Vote to UPHOLD the original resolution or OVERTURN it",
+    )
+    reasoning: str = Field(
+        default="", max_length=2000,
+        description="Optional reasoning for the vote",
+    )
+
+
+class DisputeVote(_SnakeCaseBase):
+    """A single vote on a dispute."""
+    id: str
+    dispute_id: str
+    voter_id: str
+    voter_username: str
+    vote: str  # "UPHOLD" or "OVERTURN"
+    reasoning: str
+    created_at: datetime
+
+
+class Dispute(_SnakeCaseBase):
+    """A dispute against a market resolution."""
+    id: str
+    market_id: str
+    disputer_id: str
+    disputer_username: str
+    reason: str
+    evidence: str
+    status: DisputeStatus
+    original_resolution: Outcome
+    new_resolution: Optional[Outcome] = None
+    created_at: datetime
+    resolved_at: Optional[datetime] = None
+    votes_uphold: int = 0
+    votes_overturn: int = 0
+    total_votes: int = 0
+    votes: List[DisputeVote] = []
+
+
+class MarketDisputes(_SnakeCaseBase):
+    """All disputes for a market."""
+    market_id: str
+    disputes: List[Dispute]
+    total: int

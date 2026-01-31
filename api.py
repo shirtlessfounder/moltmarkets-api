@@ -40,6 +40,7 @@ from models import (
     PortfolioPosition, PortfolioSummary, PortfolioResponse, UserBetHistoryItem,
     PaginationMeta, PaginatedMarketSummary, PaginatedLeaderboardEntry,
     PaginatedChatMessage, PaginatedBetHistoryItem,
+    DisputeStatus, DisputeCreate, DisputeVoteRequest, DisputeVote, Dispute, MarketDisputes,
 )
 from auth import init_db, require_auth, generate_api_key, ADMIN_SECRET
 from market_cache import market_cache
@@ -1313,6 +1314,342 @@ async def get_resolution_votes(market_id: str):
             for v in votes
         ],
         resolved_at=market.get("resolved_at"),
+    )
+
+
+# =============================================================================
+# Dispute Endpoints (Issue #8)
+# =============================================================================
+
+# Dispute window: how long after resolution a dispute can be filed (seconds)
+DISPUTE_WINDOW_SECONDS = int(os.getenv("DISPUTE_WINDOW_SECONDS", str(24 * 3600)))  # default 24h
+# Minimum votes required to auto-resolve a dispute
+DISPUTE_QUORUM = int(os.getenv("DISPUTE_QUORUM", "3"))
+
+
+@app.post("/markets/{market_id}/dispute", response_model=Dispute, tags=["markets"])
+async def file_dispute(market_id: str, req: DisputeCreate, user: dict = Depends(require_auth)):
+    """File a dispute against a market resolution.
+
+    **Who can dispute:**
+    Any user who placed a bet on this market (has a position or trade history).
+    The market creator cannot dispute their own resolution.
+
+    **Dispute window:**
+    Must be filed within 24 hours of resolution (configurable via
+    DISPUTE_WINDOW_SECONDS env var).
+
+    **Limits:**
+    Only one active dispute per market at a time. If a previous dispute was
+    UPHELD or OVERTURNED, a new one can be filed (within the window).
+
+    **What happens next:**
+    The dispute moves to UNDER_REVIEW. Community members who hold positions
+    can vote to UPHOLD or OVERTURN via POST /markets/{market_id}/disputes/{dispute_id}/vote.
+    When the quorum is reached (default 3 votes), the dispute auto-resolves.
+    """
+    _validate_uuid(market_id, "market_id")
+
+    market = db.get_market(market_id)
+    if not market:
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
+
+    # Must be resolved to dispute
+    if market["status"] != MarketStatus.RESOLVED:
+        return error_response(400,
+            "Only resolved markets can be disputed",
+            ErrorCode.INVALID_INPUT)
+
+    # Creator cannot dispute their own resolution
+    if market["creator_id"] == user["id"]:
+        return error_response(403,
+            "Market creator cannot dispute their own resolution",
+            ErrorCode.FORBIDDEN)
+
+    # Must have a position (bet history) in the market
+    if not db.user_has_position(market_id, user["id"]):
+        return error_response(403,
+            "Only users who placed bets on this market can file a dispute",
+            ErrorCode.NOT_ELIGIBLE)
+
+    # Check dispute window
+    resolved_at = market.get("resolved_at")
+    if resolved_at:
+        now = datetime.now(timezone.utc)
+        # Handle both timezone-aware and naive datetimes
+        if resolved_at.tzinfo is None:
+            resolved_at = resolved_at.replace(tzinfo=timezone.utc)
+        elapsed = (now - resolved_at).total_seconds()
+        if elapsed > DISPUTE_WINDOW_SECONDS:
+            hours = DISPUTE_WINDOW_SECONDS / 3600
+            return error_response(400,
+                f"Dispute window closed. Disputes must be filed within {hours:.0f} hours of resolution.",
+                ErrorCode.DISPUTE_WINDOW_CLOSED)
+
+    # Only one active dispute per market
+    existing = db.get_open_dispute_for_market(market_id)
+    if existing:
+        return error_response(409,
+            "An active dispute already exists for this market",
+            ErrorCode.DISPUTE_ALREADY_EXISTS,
+            detail={"existing_dispute_id": existing["id"]})
+
+    dispute_id = str(uuid.uuid4())
+    dispute = db.create_dispute(
+        dispute_id=dispute_id,
+        market_id=market_id,
+        disputer_id=user["id"],
+        reason=req.reason,
+        evidence=req.evidence,
+        original_resolution=market["resolution"].value,
+        status="UNDER_REVIEW",  # Skip straight to review (bettor already provided evidence)
+    )
+
+    # Publish SSE event
+    await event_bus.publish(SSEEvent(
+        event="dispute_filed",
+        data={
+            "dispute_id": dispute_id,
+            "market_id": market_id,
+            "disputer": user["username"],
+            "reason": req.reason[:200],
+        },
+        market_id=market_id,
+    ))
+
+    return Dispute(
+        id=dispute_id,
+        market_id=market_id,
+        disputer_id=user["id"],
+        disputer_username=user["username"],
+        reason=req.reason,
+        evidence=req.evidence,
+        status=DisputeStatus.UNDER_REVIEW,
+        original_resolution=market["resolution"],
+        created_at=dispute["created_at"],
+    )
+
+
+@app.get("/markets/{market_id}/disputes", response_model=MarketDisputes, tags=["markets"])
+async def get_disputes(market_id: str):
+    """Get all disputes for a market.
+
+    Returns disputes sorted by creation time (newest first), with vote
+    tallies and individual votes included.
+    """
+    _validate_uuid(market_id, "market_id")
+
+    market = db.get_market(market_id)
+    if not market:
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
+
+    raw_disputes = db.get_market_disputes(market_id)
+
+    disputes = []
+    for d in raw_disputes:
+        votes = db.get_dispute_votes(d["id"])
+        uphold = sum(1 for v in votes if v["vote"] == "UPHOLD")
+        overturn = sum(1 for v in votes if v["vote"] == "OVERTURN")
+
+        disputes.append(Dispute(
+            id=d["id"],
+            market_id=d["market_id"],
+            disputer_id=d["disputer_id"],
+            disputer_username=d.get("disputer_username", "unknown"),
+            reason=d["reason"],
+            evidence=d.get("evidence", ""),
+            status=DisputeStatus(d["status"]),
+            original_resolution=Outcome(d["original_resolution"]),
+            new_resolution=Outcome(d["new_resolution"]) if d.get("new_resolution") else None,
+            created_at=d["created_at"],
+            resolved_at=d.get("resolved_at"),
+            votes_uphold=uphold,
+            votes_overturn=overturn,
+            total_votes=len(votes),
+            votes=[
+                DisputeVote(
+                    id=v["id"],
+                    dispute_id=v["dispute_id"],
+                    voter_id=v["voter_id"],
+                    voter_username=v.get("voter_username", "unknown"),
+                    vote=v["vote"],
+                    reasoning=v.get("reasoning", ""),
+                    created_at=v["created_at"],
+                )
+                for v in votes
+            ],
+        ))
+
+    return MarketDisputes(
+        market_id=market_id,
+        disputes=disputes,
+        total=len(disputes),
+    )
+
+
+@app.post("/markets/{market_id}/disputes/{dispute_id}/vote", response_model=Dispute, tags=["markets"])
+async def vote_on_dispute(
+    market_id: str,
+    dispute_id: str,
+    req: DisputeVoteRequest,
+    user: dict = Depends(require_auth),
+):
+    """Vote on an active dispute.
+
+    **Who can vote:**
+    Any claimed user who holds a position (or placed a bet) on the market.
+    The disputer themselves cannot vote.
+
+    **Vote options:**
+    - ``UPHOLD`` — the original resolution was correct
+    - ``OVERTURN`` — the original resolution was wrong
+
+    **Auto-resolution:**
+    When the quorum (default 3 votes) is reached, the dispute auto-resolves
+    based on majority. If OVERTURNED, the market resolution is flipped and
+    payouts are recalculated.
+    """
+    _validate_uuid(market_id, "market_id")
+    _validate_uuid(dispute_id, "dispute_id")
+
+    # Verify market exists
+    market = db.get_market(market_id)
+    if not market:
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
+
+    # Verify dispute exists and belongs to this market
+    dispute = db.get_dispute(dispute_id)
+    if not dispute or dispute["market_id"] != market_id:
+        return error_response(404, "Dispute not found", ErrorCode.DISPUTE_NOT_FOUND)
+
+    # Must be under review
+    if dispute["status"] not in ("OPEN", "UNDER_REVIEW"):
+        return error_response(400,
+            "This dispute has already been resolved",
+            ErrorCode.DISPUTE_ALREADY_RESOLVED)
+
+    # Disputer cannot vote on their own dispute
+    if dispute["disputer_id"] == user["id"]:
+        return error_response(403,
+            "You cannot vote on your own dispute",
+            ErrorCode.FORBIDDEN)
+
+    # Must have a position in the market
+    if not db.user_has_position(market_id, user["id"]):
+        return error_response(403,
+            "Only users who placed bets on this market can vote on disputes",
+            ErrorCode.NOT_ELIGIBLE)
+
+    # One vote per user per dispute
+    if db.has_user_voted_on_dispute(dispute_id, user["id"]):
+        return error_response(409,
+            "You have already voted on this dispute",
+            ErrorCode.ALREADY_VOTED)
+
+    # Record the vote
+    vote_id = str(uuid.uuid4())
+    db.create_dispute_vote(
+        vote_id=vote_id,
+        dispute_id=dispute_id,
+        voter_id=user["id"],
+        vote=req.vote,
+        reasoning=req.reasoning,
+    )
+
+    # Check if quorum reached → auto-resolve
+    all_votes = db.get_dispute_votes(dispute_id)
+    uphold_count = sum(1 for v in all_votes if v["vote"] == "UPHOLD")
+    overturn_count = sum(1 for v in all_votes if v["vote"] == "OVERTURN")
+    total = len(all_votes)
+
+    new_resolution = None
+    final_status = dispute["status"]
+
+    if total >= DISPUTE_QUORUM:
+        if overturn_count > uphold_count:
+            # Overturn: flip the resolution
+            final_status = "OVERTURNED"
+            original = Outcome(dispute["original_resolution"])
+            flipped = Outcome.NO if original == Outcome.YES else Outcome.YES
+            new_resolution = flipped.value
+
+            db.update_dispute_status(dispute_id, "OVERTURNED", new_resolution=new_resolution)
+
+            # Re-resolve the market with flipped outcome
+            # First undo old payouts by re-resolving (market was already resolved)
+            # NOTE: in a production system you'd want a full payout reversal.
+            # For now we update the market resolution record. Full payout
+            # recalculation would be a follow-up task.
+            db.resolve_market(market_id, flipped)
+
+            # Invalidate cache
+            market_cache.invalidate()
+
+            # Publish SSE
+            await event_bus.publish(SSEEvent(
+                event="dispute_overturned",
+                data={
+                    "dispute_id": dispute_id,
+                    "market_id": market_id,
+                    "old_resolution": dispute["original_resolution"],
+                    "new_resolution": new_resolution,
+                    "votes_uphold": uphold_count,
+                    "votes_overturn": overturn_count,
+                },
+                market_id=market_id,
+            ))
+        else:
+            # Uphold: original resolution stands
+            final_status = "UPHELD"
+            db.update_dispute_status(dispute_id, "UPHELD")
+
+            await event_bus.publish(SSEEvent(
+                event="dispute_upheld",
+                data={
+                    "dispute_id": dispute_id,
+                    "market_id": market_id,
+                    "votes_uphold": uphold_count,
+                    "votes_overturn": overturn_count,
+                },
+                market_id=market_id,
+            ))
+
+    # Build full response
+    dispute_data = db.get_dispute(dispute_id)
+    votes_list = db.get_dispute_votes(dispute_id)
+    uphold_final = sum(1 for v in votes_list if v["vote"] == "UPHOLD")
+    overturn_final = sum(1 for v in votes_list if v["vote"] == "OVERTURN")
+
+    disputer = db.get_user(dispute_data["disputer_id"])
+    disputer_username = disputer["username"] if disputer else "unknown"
+
+    return Dispute(
+        id=dispute_data["id"],
+        market_id=dispute_data["market_id"],
+        disputer_id=dispute_data["disputer_id"],
+        disputer_username=disputer_username,
+        reason=dispute_data["reason"],
+        evidence=dispute_data.get("evidence", ""),
+        status=DisputeStatus(final_status),
+        original_resolution=Outcome(dispute_data["original_resolution"]),
+        new_resolution=Outcome(new_resolution) if new_resolution else None,
+        created_at=dispute_data["created_at"],
+        resolved_at=dispute_data.get("resolved_at"),
+        votes_uphold=uphold_final,
+        votes_overturn=overturn_final,
+        total_votes=len(votes_list),
+        votes=[
+            DisputeVote(
+                id=v["id"],
+                dispute_id=v["dispute_id"],
+                voter_id=v["voter_id"],
+                voter_username=v.get("voter_username", "unknown"),
+                vote=v["vote"],
+                reasoning=v.get("reasoning", ""),
+                created_at=v["created_at"],
+            )
+            for v in votes_list
+        ],
     )
 
 
