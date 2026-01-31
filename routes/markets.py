@@ -25,13 +25,50 @@ from models import (
     MarketCreate, MarketSummary, MarketDetail, MarketCreated,
     ProbabilityPoint, MarketHistory,
     CommitteeVoteDetail, CommitteeOutcome,
-    MarketStatus,
+    MarketStatus, ResolutionStage,
     PaginationMeta, PaginatedMarketSummary,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["markets"])
+
+
+def _compute_resolution_stage(market: dict) -> tuple:
+    """Compute resolution stage, committee_size, and votes_cast for a RESOLVING market.
+
+    Returns (resolution_stage, committee_size, votes_cast).
+    Returns (None, None, None) if market is not RESOLVING.
+    """
+    if market.get("status") != MarketStatus.RESOLVING:
+        return None, None, None
+
+    db = get_db()
+    committee = market.get("committee") or []
+    committee_size = len(committee) if committee else None
+
+    if not committee or len(committee) <= 1:
+        # Solo creator — no committee or just the creator
+        return ResolutionStage.CREATOR_PENDING, committee_size, 0
+
+    # Committee exists — check votes
+    raw_votes = db.get_committee_votes(market["id"])
+    votes_cast = len(raw_votes) if raw_votes else 0
+
+    resolution_deadline = market.get("resolution_deadline")
+    now = datetime.now(timezone.utc)
+    deadline_expired = resolution_deadline and now > resolution_deadline
+
+    if deadline_expired:
+        # Deadline passed — creator can resolve unilaterally
+        return ResolutionStage.COMMITTEE_COMPLETE, committee_size, votes_cast
+
+    if votes_cast < len(committee):
+        # Still waiting for votes
+        return ResolutionStage.COMMITTEE_VOTING, committee_size, votes_cast
+
+    # All votes in but no unanimity (otherwise market would be RESOLVED)
+    return ResolutionStage.COMMITTEE_COMPLETE, committee_size, votes_cast
 
 
 # =============================================================================
@@ -86,6 +123,7 @@ async def list_markets(
 
     result = []
     for m in page:
+        resolution_stage, committee_size, votes_cast = _compute_resolution_stage(m)
         result.append(MarketSummary(
             id=m["id"],
             title=m["title"],
@@ -95,6 +133,10 @@ async def list_markets(
             total_volume=m["total_volume"],
             creator_id=m["creator_id"],
             creator_username=m.get("creator_username"),
+            resolution_stage=resolution_stage,
+            committee_size=committee_size,
+            votes_cast=votes_cast,
+            resolution_deadline=m.get("resolution_deadline"),
         ))
 
     paginated = PaginatedMarketSummary(
@@ -123,6 +165,8 @@ def _build_market_detail(market: dict, creator_username: str = None) -> MarketDe
                 for v in raw_votes
             ]
 
+    resolution_stage, committee_size, votes_cast = _compute_resolution_stage(market)
+
     return MarketDetail(
         id=market["id"],
         title=market["title"],
@@ -141,6 +185,9 @@ def _build_market_detail(market: dict, creator_username: str = None) -> MarketDe
         committee=market.get("committee"),
         resolution_votes=committee_votes_detail,
         resolution_deadline=market.get("resolution_deadline"),
+        resolution_stage=resolution_stage,
+        committee_size=committee_size,
+        votes_cast=votes_cast,
     )
 
 

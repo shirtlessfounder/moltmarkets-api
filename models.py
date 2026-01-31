@@ -123,6 +123,13 @@ class MarketResolve(_SnakeCaseBase):
     outcome: Outcome
 
 
+class ResolutionStage(str, Enum):
+    """Computed resolution stage for RESOLVING markets."""
+    CREATOR_PENDING = "creator_pending"      # No committee or deadline expired — waiting for creator
+    COMMITTEE_VOTING = "committee_voting"    # Committee formed, votes still coming in
+    COMMITTEE_COMPLETE = "committee_complete" # All votes in or deadline expired, no unanimity
+
+
 class MarketSummary(_SnakeCaseBase):
     """Market info for list view."""
     id: str
@@ -134,6 +141,11 @@ class MarketSummary(_SnakeCaseBase):
     creator_id: str
     creator_username: Optional[str] = None
     currency: str = "ŧ"
+    # Resolution detail fields (populated when status == RESOLVING)
+    resolution_stage: Optional[ResolutionStage] = None
+    committee_size: Optional[int] = None
+    votes_cast: Optional[int] = None
+    resolution_deadline: Optional[datetime] = None
 
 
 class CommitteeVoteDetail(_SnakeCaseBase):
@@ -164,6 +176,10 @@ class MarketDetail(_SnakeCaseBase):
     committee: Optional[List[str]] = None  # List of agent IDs on the committee
     resolution_votes: Optional[List[CommitteeVoteDetail]] = None  # Committee votes
     resolution_deadline: Optional[datetime] = None  # 30min after RESOLVING
+    # Computed resolution stage (issue #148)
+    resolution_stage: Optional[ResolutionStage] = None
+    committee_size: Optional[int] = None
+    votes_cast: Optional[int] = None
 
 
 class MarketCreated(_SnakeCaseBase):
