@@ -11,7 +11,7 @@ import os
 import json
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TypedDict
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, unquote
 
@@ -206,6 +206,140 @@ def generate_api_key() -> str:
 def hash_api_key(key: str) -> str:
     """Hash an API key for storage."""
     return hashlib.sha256(key.encode()).hexdigest()
+
+
+# =============================================================================
+# Storage TypedDicts
+# =============================================================================
+
+
+class UserDict(TypedDict):
+    """Typed dictionary representing a user/agent row."""
+    id: str
+    username: str
+    display_name: str
+    description: str
+    balance: float
+    created_at: datetime
+    markets_created: int
+    total_bets: int
+    profit_all_time: float
+    api_key_hash: Optional[str]
+    status: str
+    verification_code: Optional[str]
+    last_market_created_at: Optional[datetime]
+    twitter_handle: Optional[str]
+    user_type: str
+
+
+class PoolDict(TypedDict):
+    """Typed dictionary for CPMM liquidity pool."""
+    YES: float
+    NO: float
+
+
+class MarketDict(TypedDict):
+    """Typed dictionary representing a market row."""
+    id: str
+    title: str
+    description: Optional[str]
+    status: MarketStatus
+    closes_at: datetime
+    created_at: datetime
+    resolved_at: Optional[datetime]
+    resolution: Optional[Outcome]
+    total_volume: float
+    creator_id: str
+    pool: PoolDict
+    p: float
+
+
+class MarketWithCreatorDict(MarketDict, total=False):
+    """Market dict with optional creator_username from JOIN queries."""
+    creator_username: Optional[str]
+
+
+class BetDict(TypedDict):
+    """Typed dictionary representing a bet row."""
+    id: str
+    market_id: str
+    user_id: str
+    outcome: Outcome
+    amount: float
+    shares: float
+    avg_price: float
+    probability_before: float
+    probability_after: float
+    created_at: datetime
+
+
+class BetWithUsernameDict(BetDict, total=False):
+    """Bet dict with optional username from JOIN queries."""
+    username: str
+
+
+class PositionDict(TypedDict):
+    """Typed dictionary representing a position row."""
+    market_id: str
+    user_id: str
+    yes_shares: float
+    no_shares: float
+    total_invested: float
+
+
+class CommentDict(TypedDict):
+    """Typed dictionary representing a comment row."""
+    id: str
+    market_id: str
+    user_id: str
+    content: str
+    parent_id: Optional[str]
+    created_at: datetime
+
+
+class CommentWithUsernameDict(CommentDict, total=False):
+    """Comment dict with optional username from JOIN queries."""
+    username: str
+
+
+class ResolutionVoteDict(TypedDict):
+    """Typed dictionary representing a resolution vote."""
+    agent_id: str
+    vote: str
+    reasoning: str
+    sources: List[str]
+    created_at: str
+
+
+class ResolutionVoteRowDict(ResolutionVoteDict, total=False):
+    """Resolution vote dict as returned from DB rows (may include extra fields)."""
+    id: str
+    market_id: str
+
+
+class ChatMessageDict(TypedDict):
+    """Typed dictionary representing a chat message."""
+    id: str
+    user_id: str
+    username: str
+    text: str
+    channel: str
+    created_at: datetime
+
+
+class LeaderboardEntryDict(TypedDict):
+    """Typed dictionary for a leaderboard row."""
+    user_id: str
+    username: str
+    pnl: float
+    total_volume: float
+    win_rate: float
+
+
+class ReputationDataDict(TypedDict):
+    """Typed dictionary for aggregated reputation data."""
+    resolution_votes: List[dict]
+    comments_count: int
 
 
 # =============================================================================
@@ -469,7 +603,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def _row_to_user(self, row: dict) -> dict:
+    def _row_to_user(self, row: Optional[dict]) -> Optional[UserDict]:
         """Convert database row to user dict."""
         if not row:
             return None
@@ -491,7 +625,7 @@ class Storage:
             "user_type": row.get("user_type", "agent"),
         }
     
-    def _row_to_market(self, row: dict) -> dict:
+    def _row_to_market(self, row: Optional[dict]) -> Optional[MarketDict]:
         """Convert database row to market dict."""
         if not row:
             return None
@@ -510,7 +644,7 @@ class Storage:
             "p": float(row["p"]),
         }
     
-    def _row_to_bet(self, row: dict) -> dict:
+    def _row_to_bet(self, row: Optional[dict]) -> Optional[BetDict]:
         """Convert database row to bet dict."""
         if not row:
             return None
@@ -527,7 +661,7 @@ class Storage:
             "created_at": row["created_at"],
         }
     
-    def _row_to_position(self, row: dict) -> dict:
+    def _row_to_position(self, row: Optional[dict]) -> Optional[PositionDict]:
         """Convert database row to position dict."""
         if not row:
             return None
@@ -541,7 +675,7 @@ class Storage:
     
     # --- Users ---
     
-    def get_user(self, user_id: str) -> Optional[dict]:
+    def get_user(self, user_id: str) -> Optional[UserDict]:
         if self._use_memory:
             return self._users.get(user_id)
         conn = self._get_conn()
@@ -554,9 +688,9 @@ class Storage:
             self._put_conn(conn)
     
     def create_user(self, user_id: str, username: str, balance: float = 1000.0, 
-                    api_key_hash: str = None, description: str = "",
-                    status: str = "pending", verification_code: str = None,
-                    user_type: str = "agent") -> dict:
+                    api_key_hash: Optional[str] = None, description: str = "",
+                    status: str = "pending", verification_code: Optional[str] = None,
+                    user_type: str = "agent") -> UserDict:
         if self._use_memory:
             user = {
                 "id": user_id,
@@ -591,7 +725,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def get_user_by_api_key(self, api_key: str) -> Optional[dict]:
+    def get_user_by_api_key(self, api_key: str) -> Optional[UserDict]:
         """Find user by API key."""
         key_hash = hash_api_key(api_key)
         if self._use_memory:
@@ -609,7 +743,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def get_user_by_username(self, username: str) -> Optional[dict]:
+    def get_user_by_username(self, username: str) -> Optional[UserDict]:
         """Find user by username (case-insensitive)."""
         username_lower = username.lower()
         if self._use_memory:
@@ -627,7 +761,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def update_api_key(self, user_id: str, new_key_hash: str):
+    def update_api_key(self, user_id: str, new_key_hash: str) -> None:
         """Update user's API key hash."""
         if self._use_memory:
             self._users[user_id]["api_key_hash"] = new_key_hash
@@ -659,7 +793,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def update_user_display_name(self, user_id: str, display_name: str):
+    def update_user_display_name(self, user_id: str, display_name: str) -> None:
         """Update user's display name."""
         if self._use_memory:
             self._users[user_id]["display_name"] = display_name
@@ -673,7 +807,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def delete_user(self, user_id: str):
+    def delete_user(self, user_id: str) -> None:
         """Delete a user and all their data (admin only)."""
         if self._use_memory:
             if user_id in self._users:
@@ -695,7 +829,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def update_user_api_key(self, user_id: str, key_hash: str):
+    def update_user_api_key(self, user_id: str, key_hash: str) -> None:
         """Update a user's API key hash (for key regeneration)."""
         if self._use_memory:
             if user_id in self._users:
@@ -710,7 +844,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def increment_user_markets_created(self, user_id: str):
+    def increment_user_markets_created(self, user_id: str) -> None:
         """Increment user's markets_created counter."""
         if self._use_memory:
             self._users[user_id]["markets_created"] += 1
@@ -724,7 +858,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def increment_user_total_bets(self, user_id: str):
+    def increment_user_total_bets(self, user_id: str) -> None:
         """Increment user's total_bets counter."""
         if self._use_memory:
             self._users[user_id]["total_bets"] += 1
@@ -738,7 +872,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def update_user_profit(self, user_id: str, profit_delta: float):
+    def update_user_profit(self, user_id: str, profit_delta: float) -> None:
         """Update user's profit_all_time."""
         if self._use_memory:
             self._users[user_id]["profit_all_time"] += profit_delta
@@ -752,7 +886,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def update_user_status(self, user_id: str, status: str):
+    def update_user_status(self, user_id: str, status: str) -> None:
         """Update user's claim status."""
         if self._use_memory:
             self._users[user_id]["status"] = status
@@ -766,7 +900,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def update_user_last_market_created(self, user_id: str):
+    def update_user_last_market_created(self, user_id: str) -> None:
         """Update timestamp when user last created a market (for rate limiting)."""
         now = datetime.now(timezone.utc)
         if self._use_memory:
@@ -784,7 +918,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def update_user_twitter_handle(self, user_id: str, twitter_handle: str):
+    def update_user_twitter_handle(self, user_id: str, twitter_handle: str) -> None:
         """Update user's twitter handle (from verification tweet)."""
         if self._use_memory:
             self._users[user_id]["twitter_handle"] = twitter_handle
@@ -799,7 +933,7 @@ class Storage:
             self._put_conn(conn)
     
     @property
-    def users(self) -> Dict[str, dict]:
+    def users(self) -> Dict[str, UserDict]:
         """Get all users (for leaderboard etc.)."""
         if self._use_memory:
             return self._users
@@ -815,7 +949,7 @@ class Storage:
     
     # --- Markets ---
     
-    def get_market(self, market_id: str) -> Optional[dict]:
+    def get_market(self, market_id: str) -> Optional[MarketDict]:
         if self._use_memory:
             return self._markets.get(market_id)
         
@@ -828,7 +962,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def list_markets(self) -> List[dict]:
+    def list_markets(self) -> List[MarketDict]:
         if self._use_memory:
             return list(self._markets.values())
         
@@ -841,7 +975,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def list_markets_with_creators(self) -> List[dict]:
+    def list_markets_with_creators(self) -> List[MarketWithCreatorDict]:
         """List all markets with creator usernames in a single JOIN query.
         
         Eliminates N+1: previously list_markets + N × get_user calls.
@@ -876,7 +1010,7 @@ class Storage:
             self._put_conn(conn)
     
     @property
-    def markets(self) -> Dict[str, dict]:
+    def markets(self) -> Dict[str, MarketDict]:
         """Get all markets as dict."""
         if self._use_memory:
             return self._markets
@@ -886,7 +1020,7 @@ class Storage:
     
     def create_market(self, market_id: str, creator_id: str, title: str,
                       description: str, closes_at: datetime, 
-                      initial_liquidity: float) -> dict:
+                      initial_liquidity: float) -> MarketDict:
         if self._use_memory:
             pool = {"YES": initial_liquidity, "NO": initial_liquidity}
             market = {
@@ -925,7 +1059,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def update_market_pool(self, market_id: str, new_pool: dict, new_p: float, volume_delta: float):
+    def update_market_pool(self, market_id: str, new_pool: PoolDict, new_p: float, volume_delta: float) -> None:
         if self._use_memory:
             market = self._markets[market_id]
             market["pool"] = new_pool
@@ -945,7 +1079,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def update_market_status(self, market_id: str, status: MarketStatus):
+    def update_market_status(self, market_id: str, status: MarketStatus) -> None:
         """Update a market's status (e.g. OPEN → RESOLVING)."""
         if self._use_memory:
             market = self._markets[market_id]
@@ -963,7 +1097,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def resolve_market(self, market_id: str, outcome: Outcome):
+    def resolve_market(self, market_id: str, outcome: Outcome) -> None:
         if self._use_memory:
             market = self._markets[market_id]
             market["status"] = MarketStatus.RESOLVED
@@ -987,7 +1121,7 @@ class Storage:
     
     def create_bet(self, bet_id: str, market_id: str, user_id: str,
                    outcome: Outcome, amount: float, shares: float,
-                   prob_before: float, prob_after: float) -> dict:
+                   prob_before: float, prob_after: float) -> BetDict:
         avg_price = amount / shares if shares > 0 else 0
         
         if self._use_memory:
@@ -1024,7 +1158,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def get_bets_for_market(self, market_id: str) -> List[dict]:
+    def get_bets_for_market(self, market_id: str) -> List[BetDict]:
         """Get all bets for a market."""
         if self._use_memory:
             return [b for b in self._bets.values() if b["market_id"] == market_id]
@@ -1038,7 +1172,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def get_bets_for_market_with_users(self, market_id: str) -> List[dict]:
+    def get_bets_for_market_with_users(self, market_id: str) -> List[BetWithUsernameDict]:
         """Get all bets for a market with user info in a single JOIN query.
         
         Eliminates N+1: previously get_bets_for_market + N × get_user calls.
@@ -1074,7 +1208,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def get_bets_for_user(self, user_id: str) -> List[dict]:
+    def get_bets_for_user(self, user_id: str) -> List[BetDict]:
         """Get all bets for a user."""
         if self._use_memory:
             return [b for b in self._bets.values() if b["user_id"] == user_id]
@@ -1089,7 +1223,7 @@ class Storage:
             self._put_conn(conn)
     
     @property
-    def bets(self) -> Dict[str, dict]:
+    def bets(self) -> Dict[str, BetDict]:
         """Get all bets as dict."""
         if self._use_memory:
             return self._bets
@@ -1103,7 +1237,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def get_leaderboard_data(self) -> List[dict]:
+    def get_leaderboard_data(self) -> List[LeaderboardEntryDict]:
         """Get leaderboard data using aggregate SQL query.
         
         Eliminates N+1: previously loaded ALL users + ALL bets + ALL markets
@@ -1190,7 +1324,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def get_reputation_data(self, user_id: str) -> dict:
+    def get_reputation_data(self, user_id: str) -> ReputationDataDict:
         """Get all data needed for reputation calculation in minimal queries.
         
         Eliminates N+1: previously looped through ALL markets to fetch
@@ -1243,7 +1377,7 @@ class Storage:
     
     # --- Positions ---
     
-    def get_position(self, market_id: str, user_id: str) -> Optional[dict]:
+    def get_position(self, market_id: str, user_id: str) -> Optional[PositionDict]:
         if self._use_memory:
             return self._positions.get(market_id, {}).get(user_id)
         
@@ -1256,7 +1390,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def get_market_positions(self, market_id: str) -> List[dict]:
+    def get_market_positions(self, market_id: str) -> List[PositionDict]:
         if self._use_memory:
             return list(self._positions.get(market_id, {}).values())
         
@@ -1270,7 +1404,7 @@ class Storage:
             self._put_conn(conn)
     
     def update_position(self, market_id: str, user_id: str, 
-                        outcome: Outcome, shares_delta: float, invested_delta: float):
+                        outcome: Outcome, shares_delta: float, invested_delta: float) -> None:
         if self._use_memory:
             if market_id not in self._positions:
                 self._positions[market_id] = {}
@@ -1314,7 +1448,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def get_user_positions(self, user_id: str) -> List[dict]:
+    def get_user_positions(self, user_id: str) -> List[PositionDict]:
         """Get all positions for a user across all markets."""
         if self._use_memory:
             positions = []
@@ -1336,7 +1470,7 @@ class Storage:
             self._put_conn(conn)
 
     def reduce_position(self, market_id: str, user_id: str, 
-                        outcome: Outcome, shares: float):
+                        outcome: Outcome, shares: float) -> None:
         """Reduce shares in a position (for selling)."""
         if self._use_memory:
             if market_id in self._positions and user_id in self._positions[market_id]:
@@ -1369,7 +1503,7 @@ class Storage:
     # --- Comments ---
     
     def create_comment(self, comment_id: str, market_id: str, user_id: str, 
-                       content: str, parent_id: Optional[str] = None) -> dict:
+                       content: str, parent_id: Optional[str] = None) -> CommentDict:
         """Create a new comment on a market."""
         now = datetime.now(timezone.utc)
         comment = {
@@ -1399,7 +1533,7 @@ class Storage:
             self._put_conn(conn)
         return comment
     
-    def get_market_comments(self, market_id: str) -> List[dict]:
+    def get_market_comments(self, market_id: str) -> List[CommentWithUsernameDict]:
         """Get all comments for a market, ordered by creation time."""
         if self._use_memory:
             if not hasattr(self, '_comments'):
@@ -1426,7 +1560,7 @@ class Storage:
     
     # --- Resolution Votes ---
     
-    def save_resolution_votes(self, market_id: str, votes: List[dict]):
+    def save_resolution_votes(self, market_id: str, votes: List[ResolutionVoteDict]) -> None:
         """Save resolution votes for a market."""
         if self._use_memory:
             if not hasattr(self, '_resolution_votes'):
@@ -1455,7 +1589,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def get_resolution_votes(self, market_id: str) -> List[dict]:
+    def get_resolution_votes(self, market_id: str) -> List[ResolutionVoteRowDict]:
         """Get all resolution votes for a market."""
         if self._use_memory:
             if not hasattr(self, '_resolution_votes'):
@@ -1483,7 +1617,7 @@ class Storage:
     
     # --- Chat Messages ---
     
-    def create_chat_message(self, user_id: str, username: str, text: str, channel: str = "agents") -> dict:
+    def create_chat_message(self, user_id: str, username: str, text: str, channel: str = "agents") -> ChatMessageDict:
         """Create a new chat message."""
         now = datetime.now(timezone.utc)
         msg_id = str(uuid.uuid4())
@@ -1516,7 +1650,7 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    def get_chat_messages(self, limit: int = 50, since: Optional[datetime] = None, channel: str = "agents") -> List[dict]:
+    def get_chat_messages(self, limit: int = 50, since: Optional[datetime] = None, channel: str = "agents") -> List[ChatMessageDict]:
         """Get recent chat messages, optionally filtering by since timestamp and channel."""
         if self._use_memory:
             if not hasattr(self, '_chat_messages'):
@@ -1553,7 +1687,7 @@ class Storage:
     
     # --- Utility ---
     
-    def _save(self):
+    def _save(self) -> None:
         """No-op for PostgreSQL (kept for compatibility)."""
         pass
 
@@ -1569,7 +1703,7 @@ db = Storage()
 async def get_current_user(
     authorization: Optional[str] = Header(None),
     x_api_key: Optional[str] = Header(None),
-) -> dict:
+) -> UserDict:
     """
     Authenticate via API key. Returns demo-user for anonymous reads.
     
@@ -1606,7 +1740,7 @@ async def get_current_user(
 async def require_auth(
     authorization: Optional[str] = Header(None),
     x_api_key: Optional[str] = Header(None),
-) -> dict:
+) -> UserDict:
     """
     Strict authentication required. No demo-user fallback.
     Use this for all write operations (bets, markets, comments).
