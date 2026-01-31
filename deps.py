@@ -160,8 +160,81 @@ def verify_tweet_contains_code(tweet_text: str, code: str) -> bool:
 # Market transition helpers
 # ---------------------------------------------------------------------------
 
+COMMITTEE_WINDOW_MINUTES = 30  # Creator fallback deadline
+
+
+def form_committee(market_id: str, market: dict) -> list:
+    """Form a resolution committee for a market entering RESOLVING state.
+
+    Committee = market creator + up to 2 highest-invested traders on that market.
+    Sets committee list and resolution_deadline on the market.
+    Returns the committee member list.
+    """
+    db = get_db()
+    creator_id = market["creator_id"]
+
+    # Get all positions on this market, excluding the creator
+    positions = db.get_market_positions(market_id)
+    other_traders = [
+        p for p in positions
+        if p["user_id"] != creator_id and p["total_invested"] > 0
+    ]
+
+    # Sort by total invested (highest first) — proxy for "highest reputation on this market"
+    other_traders.sort(key=lambda p: p["total_invested"], reverse=True)
+
+    # Committee = creator + top 2 traders
+    committee = [creator_id]
+    for trader in other_traders[:2]:
+        committee.append(trader["user_id"])
+
+    # Set deadline: 30 minutes from now
+    now = datetime.now(timezone.utc)
+    from datetime import timedelta
+    resolution_deadline = now + timedelta(minutes=COMMITTEE_WINDOW_MINUTES)
+
+    db.update_market_committee(market_id, committee, resolution_deadline)
+    market["committee"] = committee
+    market["resolution_deadline"] = resolution_deadline
+
+    logger.info(
+        "Committee formed for market %s: %d members (creator + %d traders), deadline %s",
+        market_id, len(committee), len(committee) - 1, resolution_deadline.isoformat(),
+    )
+    return committee
+
+
+def check_committee_unanimity(market_id: str, committee: list) -> Optional[str]:
+    """Check if all committee members voted unanimously for the same YES/NO outcome.
+
+    Returns the unanimous outcome string ("YES" or "NO") if achieved, else None.
+    INVALID votes or mixed votes return None.
+    """
+    db = get_db()
+    votes = db.get_committee_votes(market_id)
+
+    if not votes or len(votes) < len(committee):
+        return None  # Not all members have voted
+
+    outcomes = set()
+    for vote in votes:
+        if vote["agent_id"] in committee:
+            outcomes.add(vote["outcome"])
+
+    # Must be exactly one outcome and it must be YES or NO (not INVALID)
+    if len(outcomes) == 1:
+        outcome = outcomes.pop()
+        if outcome in ("YES", "NO"):
+            return outcome
+
+    return None
+
+
 def maybe_transition_market(market: dict, market_id: str) -> None:
-    """Transition a single OPEN market to RESOLVING if past closes_at."""
+    """Transition a single OPEN market to RESOLVING if past closes_at.
+
+    Also forms the committee when transitioning to RESOLVING.
+    """
     from models import MarketStatus
     db = get_db()
     if market["status"] != MarketStatus.OPEN:
@@ -170,6 +243,9 @@ def maybe_transition_market(market: dict, market_id: str) -> None:
     if market["closes_at"] <= now:
         db.update_market_status(market_id, MarketStatus.RESOLVING)
         market["status"] = MarketStatus.RESOLVING
+        # Form committee if not already formed
+        if not market.get("committee"):
+            form_committee(market_id, market)
 
 
 def bg_transition_expired_markets() -> None:

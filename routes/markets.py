@@ -15,8 +15,8 @@ from cpmm import get_cpmm_probability
 from deps import (
     get_db, validate_uuid, clamp_pagination, maybe_transition_market,
     bg_transition_expired_markets, calculate_and_distribute_payouts,
-    set_cache_headers,
-    MARKET_CREATION_COST,
+    set_cache_headers, form_committee, check_committee_unanimity,
+    MARKET_CREATION_COST, COMMITTEE_WINDOW_MINUTES,
     CABAL_USERNAMES, CABAL_COOLDOWN_MINUTES, DEFAULT_COOLDOWN_MINUTES,
     MAX_MARKET_DURATION_SECONDS, CURRENCY_SYMBOL,
 )
@@ -28,6 +28,8 @@ from models import (
     ProbabilityPoint, MarketHistory,
     CommentCreate, Comment, MarketComments,
     ResolutionResult, ResolutionVote,
+    CommitteeVoteRequest, CommitteeVoteResponse, CommitteeStatusResponse,
+    CommitteeVoteDetail, CommitteeOutcome,
     MarketStatus, Outcome,
     PaginationMeta, PaginatedMarketSummary,
 )
@@ -119,19 +121,22 @@ async def list_markets(
     return paginated
 
 
-@router.get("/markets/{market_id}", response_model=MarketDetail)
-async def get_market(market_id: str):
-    """Get market details including current probability."""
+def _build_market_detail(market: dict, creator_username: str = None) -> MarketDetail:
+    """Build a MarketDetail response from a market dict, including committee fields."""
     db = get_db()
-    validate_uuid(market_id, "market_id")
-    market = db.get_market(market_id)
-    if not market:
-        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
-
-    maybe_transition_market(market, market_id)
-
-    creator = db.get_user(market["creator_id"]) if market["creator_id"] else None
-    creator_username = creator["username"] if creator else None
+    # Build committee vote details if committee exists
+    committee_votes_detail = None
+    if market.get("committee"):
+        raw_votes = db.get_committee_votes(market["id"])
+        if raw_votes:
+            committee_votes_detail = [
+                CommitteeVoteDetail(
+                    agent_id=v["agent_id"],
+                    outcome=CommitteeOutcome(v["outcome"]),
+                    timestamp=v["created_at"],
+                )
+                for v in raw_votes
+            ]
 
     return MarketDetail(
         id=market["id"],
@@ -148,7 +153,27 @@ async def get_market(market_id: str):
         creator_username=creator_username,
         pool=market["pool"],
         p=market["p"],
+        committee=market.get("committee"),
+        resolution_votes=committee_votes_detail,
+        resolution_deadline=market.get("resolution_deadline"),
     )
+
+
+@router.get("/markets/{market_id}", response_model=MarketDetail)
+async def get_market(market_id: str):
+    """Get market details including current probability."""
+    db = get_db()
+    validate_uuid(market_id, "market_id")
+    market = db.get_market(market_id)
+    if not market:
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
+
+    maybe_transition_market(market, market_id)
+
+    creator = db.get_user(market["creator_id"]) if market["creator_id"] else None
+    creator_username = creator["username"] if creator else None
+
+    return _build_market_detail(market, creator_username)
 
 
 # =============================================================================
@@ -256,7 +281,14 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
 
 @router.post("/markets/{market_id}/resolve", response_model=MarketDetail)
 async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depends(require_auth)):
-    """Resolve a market. Only creator can resolve."""
+    """Resolve a market. Only creator can resolve.
+
+    Committee window enforcement (issue #107):
+    - If a committee exists with >1 member and the deadline hasn't passed,
+      the creator must use the committee vote endpoint instead.
+    - After the 30-minute deadline, creator regains unilateral resolve.
+    - Solo creator (no other traders) can resolve immediately.
+    """
     db = get_db()
     validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
@@ -270,6 +302,20 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
         return error_response(400, "Market already resolved", ErrorCode.ALREADY_RESOLVED)
 
     maybe_transition_market(market, market_id)
+
+    # Committee window enforcement
+    committee = market.get("committee") or []
+    resolution_deadline = market.get("resolution_deadline")
+    if len(committee) > 1 and resolution_deadline:
+        now = datetime.now(timezone.utc)
+        if now < resolution_deadline:
+            remaining = (resolution_deadline - now).total_seconds() / 60
+            return error_response(403,
+                f"Committee resolution window is active. Use POST /markets/{market_id}/resolution-vote instead. "
+                f"Creator can resolve unilaterally in {remaining:.0f} minutes.",
+                ErrorCode.COMMITTEE_WINDOW_ACTIVE,
+                detail={"resolution_deadline": resolution_deadline.isoformat(),
+                        "remaining_minutes": round(remaining, 1)})
 
     db.resolve_market(market_id, req.outcome)
     calculate_and_distribute_payouts(market_id, req.outcome)
@@ -292,21 +338,146 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
         market_id=market["id"],
     ))
 
-    return MarketDetail(
-        id=market["id"],
-        title=market["title"],
-        description=market["description"],
-        probability=1.0 if req.outcome == Outcome.YES else 0.0,
-        status=market["status"],
-        closes_at=market["closes_at"],
-        created_at=market["created_at"],
-        resolved_at=market["resolved_at"],
-        resolution=market["resolution"],
-        total_volume=market["total_volume"],
-        creator_id=market["creator_id"],
-        creator_username=creator_username,
-        pool=market["pool"],
-        p=market["p"],
+    return _build_market_detail(market, creator_username)
+
+
+# =============================================================================
+# Committee Resolution Voting (issue #107)
+# =============================================================================
+
+@router.post("/markets/{market_id}/resolution-vote", response_model=CommitteeVoteResponse)
+async def cast_committee_vote(market_id: str, req: CommitteeVoteRequest, user: dict = Depends(require_auth)):
+    """Cast a committee resolution vote.
+
+    Only committee members can vote. Votes can be changed before unanimity.
+    Unanimous YES/NO triggers auto-resolution with payout distribution.
+    """
+    db = get_db()
+    validate_uuid(market_id, "market_id")
+    market = db.get_market(market_id)
+    if not market:
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
+
+    maybe_transition_market(market, market_id)
+
+    if market["status"] == MarketStatus.RESOLVED:
+        return error_response(400, "Market already resolved", ErrorCode.ALREADY_RESOLVED)
+
+    if market["status"] != MarketStatus.RESOLVING:
+        return error_response(400, "Market is not in RESOLVING state", ErrorCode.MARKET_CLOSED)
+
+    # Form committee if not yet formed (e.g., market was set to RESOLVING externally)
+    committee = market.get("committee")
+    if not committee:
+        committee = form_committee(market_id, market)
+
+    # Check membership
+    if user["id"] not in committee:
+        return error_response(403,
+            "You are not a member of the resolution committee for this market",
+            ErrorCode.NOT_COMMITTEE_MEMBER)
+
+    # Cast/update vote
+    db.upsert_committee_vote(market_id, user["id"], req.outcome.value)
+
+    # Check for unanimity
+    unanimous_outcome = check_committee_unanimity(market_id, committee)
+    auto_resolved = False
+    resolution_outcome = None
+
+    if unanimous_outcome:
+        outcome_enum = Outcome.YES if unanimous_outcome == "YES" else Outcome.NO
+        db.resolve_market(market_id, outcome_enum)
+        calculate_and_distribute_payouts(market_id, outcome_enum)
+        market_cache.invalidate()
+        auto_resolved = True
+        resolution_outcome = outcome_enum
+
+        await event_bus.publish(SSEEvent(
+            event="market_resolved",
+            data={
+                "market_id": market_id,
+                "title": market["title"],
+                "outcome": unanimous_outcome,
+                "resolved_at": str(datetime.now(timezone.utc)),
+                "resolution_method": "committee_unanimous",
+            },
+            market_id=market_id,
+        ))
+
+        logger.info(
+            "Market %s auto-resolved via unanimous committee vote: %s",
+            market_id, unanimous_outcome,
+        )
+
+    return CommitteeVoteResponse(
+        market_id=market_id,
+        agent_id=user["id"],
+        outcome=req.outcome,
+        auto_resolved=auto_resolved,
+        resolution_outcome=resolution_outcome,
+    )
+
+
+@router.get("/markets/{market_id}/committee-votes", response_model=CommitteeStatusResponse)
+async def get_committee_status(market_id: str):
+    """Get the committee resolution status for a market.
+
+    Shows committee members, their votes, the deadline, and whether
+    unanimity has been reached.
+    """
+    db = get_db()
+    validate_uuid(market_id, "market_id")
+    market = db.get_market(market_id)
+    if not market:
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
+
+    maybe_transition_market(market, market_id)
+
+    committee = market.get("committee") or []
+    resolution_deadline = market.get("resolution_deadline")
+
+    # Get votes
+    raw_votes = db.get_committee_votes(market_id)
+    votes = [
+        CommitteeVoteDetail(
+            agent_id=v["agent_id"],
+            outcome=CommitteeOutcome(v["outcome"]),
+            timestamp=v["created_at"],
+        )
+        for v in raw_votes
+    ]
+
+    # Determine status
+    now = datetime.now(timezone.utc)
+    if market["status"] == MarketStatus.RESOLVED:
+        status = "resolved"
+    elif not committee:
+        status = "no_committee"
+    else:
+        unanimous_outcome = check_committee_unanimity(market_id, committee)
+        if unanimous_outcome:
+            status = "unanimous"
+        elif resolution_deadline and now > resolution_deadline:
+            status = "expired"
+        elif raw_votes:
+            status = "mixed" if len(set(v["outcome"] for v in raw_votes)) > 1 else "pending"
+        else:
+            status = "pending"
+
+    unanimous_outcome_val = None
+    if status == "unanimous":
+        result = check_committee_unanimity(market_id, committee)
+        if result:
+            unanimous_outcome_val = Outcome(result)
+
+    return CommitteeStatusResponse(
+        market_id=market_id,
+        committee=committee,
+        votes=votes,
+        resolution_deadline=resolution_deadline,
+        status=status,
+        unanimous_outcome=unanimous_outcome_val,
     )
 
 
