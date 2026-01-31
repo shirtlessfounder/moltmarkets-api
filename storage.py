@@ -676,7 +676,6 @@ class Storage:
 
         See: https://github.com/shirtlessfounder/moltmarkets-api/issues/54
         """
-        import warnings
         warnings.warn(
             "db.users loads the entire users table into memory. "
             "Use count_users(), get_user(), or get_leaderboard_data() instead. "
@@ -866,7 +865,6 @@ class Storage:
 
         See: https://github.com/shirtlessfounder/moltmarkets-api/issues/54
         """
-        import warnings
         warnings.warn(
             "db.markets loads the entire markets table into memory. "
             "Use count_markets(), get_market(), get_markets_by_ids(), or "
@@ -1098,7 +1096,6 @@ class Storage:
 
         See: https://github.com/shirtlessfounder/moltmarkets-api/issues/54
         """
-        import warnings
         warnings.warn(
             "db.bets loads the entire bets table into memory. "
             "Use get_bets_for_market(), get_bets_for_user(), or "

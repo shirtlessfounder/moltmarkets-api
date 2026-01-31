@@ -7,7 +7,6 @@ Uses PostgreSQL for persistence.
 Currency: Points (ŧ) — not real money. All balances and amounts are denominated in points.
 """
 
-import json
 import logging
 import os
 import re
@@ -15,7 +14,7 @@ import secrets
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from errors import error_response, APIError, ErrorCode, api_error_handler, http_exception_handler, unhandled_exception_handler
