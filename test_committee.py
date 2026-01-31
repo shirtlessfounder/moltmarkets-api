@@ -16,7 +16,6 @@ Run with: python -m pytest test_committee.py -v
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -30,7 +29,6 @@ from api import app, db  # noqa: E402
 from committee import (  # noqa: E402
     COMMITTEE_WINDOW_MINUTES, form_committee, check_committee_unanimity,
 )
-from deps import STARTING_BALANCE, TRADE_FEE_RATE, MARKET_CREATION_COST  # noqa: E402
 from models import MarketStatus, Outcome  # noqa: E402
 from rate_limiter import rate_limiter  # noqa: E402
 

@@ -18,7 +18,6 @@ from deps import (
     MAX_MARKET_DURATION_SECONDS, CURRENCY_SYMBOL,
 )
 from utils import validate_uuid, clamp_pagination, set_cache_headers
-from utils import validate_uuid, clamp_pagination, set_cache_headers
 from errors import error_response, ErrorCode
 from event_bus import event_bus, SSEEvent
 from market_cache import market_cache
