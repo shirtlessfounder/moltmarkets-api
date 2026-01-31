@@ -206,6 +206,7 @@ class BetStorageMixin:
                 entries.append({
                     "user_id": user["id"],
                     "username": user["username"],
+                    "balance": user["balance"],
                     "pnl": user["profit_all_time"],
                     "total_volume": total_volume,
                     "win_rate": win_rate,
@@ -235,6 +236,7 @@ class BetStorageMixin:
                     SELECT
                         u.id AS user_id,
                         u.username,
+                        u.balance,
                         u.profit_all_time AS pnl,
                         COALESCE(v.total_volume, 0) AS total_volume,
                         CASE
@@ -253,6 +255,7 @@ class BetStorageMixin:
                     {
                         "user_id": row["user_id"],
                         "username": row["username"],
+                        "balance": float(row["balance"]),
                         "pnl": float(row["pnl"]),
                         "total_volume": float(row["total_volume"]),
                         "win_rate": float(row["win_rate"]),

@@ -493,6 +493,7 @@ async def get_leaderboard(
             LeaderboardEntry(
                 user_id=entry["user_id"],
                 username=entry["username"],
+                balance=entry["balance"],
                 pnl=entry["pnl"],
                 total_volume=entry["total_volume"],
                 win_rate=entry["win_rate"],

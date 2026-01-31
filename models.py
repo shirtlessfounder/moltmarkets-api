@@ -340,6 +340,7 @@ class LeaderboardEntry(_SnakeCaseBase):
     """Entry in the leaderboard. All amounts are in points (ŧ)."""
     user_id: str
     username: str
+    balance: float
     pnl: float
     total_volume: float
     win_rate: float
