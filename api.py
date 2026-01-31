@@ -37,6 +37,8 @@ from models import (
     TradingScoreResponse, ResolutionScoreResponse,
     CreationScoreResponse, ParticipationScoreResponse,
     PortfolioPosition, PortfolioSummary, PortfolioResponse, UserBetHistoryItem,
+    PaginationMeta, PaginatedMarketSummary, PaginatedLeaderboardEntry,
+    PaginatedChatMessage, PaginatedBetHistoryItem,
 )
 from market_cache import market_cache
 from idempotency import IdempotencyMiddleware, idempotency_store
@@ -119,6 +121,28 @@ def _validate_uuid(value: str, param_name: str = "id") -> None:
             message=f"Invalid {param_name}: '{value}' is not a valid UUID",
             code=ErrorCode.INVALID_INPUT,
         )
+
+
+# =============================================================================
+# Pagination Defaults
+# =============================================================================
+
+PAGINATION_DEFAULT_LIMIT = 50
+PAGINATION_MAX_LIMIT = 100
+
+
+def _clamp_pagination(limit: Optional[int], offset: Optional[int]) -> tuple:
+    """Clamp and validate pagination parameters.
+
+    Returns (limit, offset) clamped to valid ranges.
+    """
+    if limit is None or limit < 1:
+        limit = PAGINATION_DEFAULT_LIMIT
+    if limit > PAGINATION_MAX_LIMIT:
+        limit = PAGINATION_MAX_LIMIT
+    if offset is None or offset < 0:
+        offset = 0
+    return limit, offset
 
 
 def generate_verification_code() -> str:
@@ -444,13 +468,15 @@ def _calculate_and_distribute_payouts(market_id: str, outcome: Outcome) -> int:
 # Market Endpoints
 # =============================================================================
 
-@app.get("/markets", response_model=List[MarketSummary], tags=["markets"])
+@app.get("/markets", response_model=PaginatedMarketSummary, tags=["markets"])
 async def list_markets(
     request: Request,
     response: Response,
     status: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
 ):
-    """List markets, filtered by status.
+    """List markets, filtered by status, with pagination.
 
     Query params:
         status: Filter by market status.
@@ -465,12 +491,14 @@ async def list_markets(
         when data hasn't changed, saving bandwidth and parse time.
         Server-side results are cached in-memory with a 5-second TTL and
         invalidated immediately on any market mutation (create, bet, sell, resolve).
+
+        limit: Max results to return (default 50, max 100).
+        offset: Number of results to skip (default 0).
     """
+    limit, offset = _clamp_pagination(limit, offset)
     status_filter = (status or "active").strip().upper()
 
     # ── HTTP conditional request: If-None-Match ──
-    # Check before doing any work — if the client already has the current version,
-    # return 304 immediately (no DB query, no serialization).
     client_etag = request.headers.get("if-none-match")
     cached = market_cache.get(status_filter)
     if cached and client_etag and client_etag == cached["etag"]:
@@ -517,9 +545,12 @@ async def list_markets(
         # Default: only open markets (ACTIVE or OPEN both map here)
         markets = [m for m in markets if m["status"] == MarketStatus.OPEN]
 
+    total = len(markets)
+    page = markets[offset : offset + limit]
+
     # Build response — precompute probability once per market
     result = []
-    for m in markets:
+    for m in page:
         result.append(MarketSummary(
             id=m["id"],
             title=m["title"],
@@ -531,10 +562,14 @@ async def list_markets(
             creator_username=m.get("creator_username"),
         ))
 
-    # Store in cache
-    entry = market_cache.set(status_filter, result)
+    # Store in cache and return paginated response
+    paginated = PaginatedMarketSummary(
+        data=result,
+        pagination=PaginationMeta(limit=limit, offset=offset, total=total),
+    )
+    entry = market_cache.set(status_filter, paginated)
     _set_cache_headers(response, entry["etag"], market_cache.last_modified)
-    return result
+    return paginated
 
 
 def _set_cache_headers(response: Response, etag: str, last_modified: datetime) -> None:
@@ -1028,10 +1063,21 @@ async def get_market_history(market_id: str):
     return MarketHistory(market_id=market_id, points=points)
 
 
-@app.get("/markets/{market_id}/bets", response_model=List[BetHistoryItem], tags=["trading"])
-async def get_market_bets(market_id: str):
-    """Get all bets for a market."""
+@app.get("/markets/{market_id}/bets", response_model=PaginatedBetHistoryItem, tags=["trading"])
+async def get_market_bets(
+    market_id: str,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+):
+    """Get bets for a market with pagination.
+
+    Query params:
+        limit: Max results to return (default 50, max 100).
+        offset: Number of results to skip (default 0).
+    """
     _validate_uuid(market_id, "market_id")
+    limit, offset = _clamp_pagination(limit, offset)
+
     market = db.get_market(market_id)
     if not market:
         return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
@@ -1042,9 +1088,12 @@ async def get_market_bets(market_id: str):
         key=lambda x: x["created_at"],
         reverse=True  # Most recent first
     )
+
+    total = len(market_bets)
+    page = market_bets[offset : offset + limit]
     
     items = []
-    for bet in market_bets:
+    for bet in page:
         items.append(BetHistoryItem(
             bet_id=bet["id"],
             user_id=bet["user_id"],
@@ -1056,7 +1105,10 @@ async def get_market_bets(market_id: str):
             created_at=bet["created_at"],
         ))
     
-    return items
+    return PaginatedBetHistoryItem(
+        data=items,
+        pagination=PaginationMeta(limit=limit, offset=offset, total=total),
+    )
 
 
 # =============================================================================
@@ -1859,22 +1911,38 @@ async def register_human(req: HumanRegister, request: Request, response: Respons
 # Leaderboard
 # =============================================================================
 
-@app.get("/leaderboard", response_model=List[LeaderboardEntry], tags=["agents"])
-async def get_leaderboard():
-    """Get leaderboard sorted by profit (only shows claimed/verified agents)."""
+@app.get("/leaderboard", response_model=PaginatedLeaderboardEntry, tags=["agents"])
+async def get_leaderboard(
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+):
+    """Get leaderboard sorted by profit (only shows claimed/verified agents).
+
+    Query params:
+        limit: Max results to return (default 50, max 100).
+        offset: Number of results to skip (default 0).
+    """
+    limit, offset = _clamp_pagination(limit, offset)
+
     # Single aggregate query with CTEs (was: 3 full-table loads + O(users × bets) iteration)
     leaderboard_data = db.get_leaderboard_data()
+
+    total = len(leaderboard_data)
+    page = leaderboard_data[offset : offset + limit]
     
-    return [
-        LeaderboardEntry(
-            user_id=entry["user_id"],
-            username=entry["username"],
-            pnl=entry["pnl"],
-            total_volume=entry["total_volume"],
-            win_rate=entry["win_rate"],
-        )
-        for entry in leaderboard_data
-    ]
+    return PaginatedLeaderboardEntry(
+        data=[
+            LeaderboardEntry(
+                user_id=entry["user_id"],
+                username=entry["username"],
+                pnl=entry["pnl"],
+                total_volume=entry["total_volume"],
+                win_rate=entry["win_rate"],
+            )
+            for entry in page
+        ],
+        pagination=PaginationMeta(limit=limit, offset=offset, total=total),
+    )
 
 
 # =============================================================================
@@ -1932,27 +2000,29 @@ async def send_chat_message(req: ChatMessageCreate, response: Response, channel:
     )
 
 
-@app.get("/chat", response_model=List[ChatMessage], tags=["chat"])
-async def get_chat_messages(limit: int = 50, since: Optional[str] = None, channel: str = "agents"):
+@app.get("/chat", response_model=PaginatedChatMessage, tags=["chat"])
+async def get_chat_messages(
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+    since: Optional[str] = None,
+    channel: str = "agents",
+):
     """
-    Get recent chat messages.
+    Get recent chat messages with pagination.
     
     Query params:
-        limit: Number of messages to return (default 50, max 200).
+        limit: Max results to return (default 50, max 100).
+        offset: Number of results to skip (default 0).
         since: ISO 8601 timestamp — only return messages after this time (for polling).
         channel: Chat channel to read from ('agents' or 'humans', default 'agents').
     
     Returns messages sorted by created_at DESC (newest first).
     """
+    limit, offset = _clamp_pagination(limit, offset)
+
     # Validate channel
     if channel not in ("agents", "humans"):
         return error_response(400, "Invalid channel. Must be 'agents' or 'humans'.", ErrorCode.INVALID_INPUT)
-    
-    # Clamp limit
-    if limit < 1:
-        limit = 1
-    if limit > 200:
-        limit = 200
     
     # Parse since parameter
     since_dt = None
@@ -1962,18 +2032,25 @@ async def get_chat_messages(limit: int = 50, since: Optional[str] = None, channe
         except ValueError:
             return error_response(400, "Invalid 'since' parameter. Use ISO 8601 format (e.g. 2026-01-30T23:00:00Z).", ErrorCode.INVALID_INPUT)
     
-    messages = db.get_chat_messages(limit=limit, since=since_dt, channel=channel)
+    # Fetch a generous batch so we can compute total after filtering
+    all_messages = db.get_chat_messages(limit=10000, since=since_dt, channel=channel)
+
+    total = len(all_messages)
+    page = all_messages[offset : offset + limit]
     
-    return [
-        ChatMessage(
-            id=str(m["id"]),
-            username=m["username"],
-            text=m["text"],
-            channel=m.get("channel", "agents"),
-            created_at=m["created_at"],
-        )
-        for m in messages
-    ]
+    return PaginatedChatMessage(
+        data=[
+            ChatMessage(
+                id=str(m["id"]),
+                username=m["username"],
+                text=m["text"],
+                channel=m.get("channel", "agents"),
+                created_at=m["created_at"],
+            )
+            for m in page
+        ],
+        pagination=PaginationMeta(limit=limit, offset=offset, total=total),
+    )
 
 
 # =============================================================================

@@ -1154,7 +1154,7 @@ class Storage:
                     "win_rate": win_rate,
                 })
             entries.sort(key=lambda x: x["pnl"], reverse=True)
-            return entries[:50]
+            return entries
         
         conn = self._get_conn()
         try:
@@ -1190,7 +1190,6 @@ class Storage:
                     LEFT JOIN user_win_rates w ON u.id = w.user_id
                     WHERE u.status = 'claimed'
                     ORDER BY u.profit_all_time DESC
-                    LIMIT 50
                 """)
                 rows = cur.fetchall()
                 return [
