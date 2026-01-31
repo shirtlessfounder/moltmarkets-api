@@ -16,7 +16,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
 from errors import error_response, APIError, ErrorCode, api_error_handler, http_exception_handler, unhandled_exception_handler
 import httpx
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability
@@ -39,45 +38,16 @@ from models import (
     PaginationMeta, PaginatedMarketSummary, PaginatedLeaderboardEntry,
     PaginatedChatMessage, PaginatedBetHistoryItem,
 )
+from auth import init_db, require_auth, generate_api_key, ADMIN_SECRET
 from market_cache import market_cache
-from idempotency import IdempotencyMiddleware, idempotency_store
+from middleware import set_rate_limit_headers, raise_rate_limited, configure_middleware
+from idempotency import idempotency_store
 from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE
 from reputation import compute_reputation
 from resolver import resolve_market as resolver_resolve_market
 from storage import Storage, hash_api_key
 
 logger = logging.getLogger(__name__)
-
-
-def set_rate_limit_headers(response: Response, info: dict) -> None:
-    """Inject standard rate-limit headers into a FastAPI Response.
-
-    Headers follow the draft IETF RateLimit header spec and the widely-adopted
-    X-RateLimit-* convention so agent HTTP clients can self-throttle.
-    """
-    response.headers["X-RateLimit-Limit"] = str(info.get("limit", ""))
-    response.headers["X-RateLimit-Remaining"] = str(info.get("remaining", ""))
-    response.headers["X-RateLimit-Reset"] = str(info.get("reset", ""))
-
-
-def raise_rate_limited(detail: str, info: dict) -> None:
-    """Raise an APIError with 429 status and Retry-After header guidance.
-
-    The ``info`` dict comes from ``rate_limiter.check()`` and contains the
-    ``retry_after`` value in seconds.
-    """
-    raise APIError(
-        status_code=429,
-        message=detail,
-        code=ErrorCode.RATE_LIMITED,
-        detail={"retry_after": info.get("retry_after", 60)},
-        headers={
-            "Retry-After": str(info.get("retry_after", 60)),
-            "X-RateLimit-Limit": str(info.get("limit", "")),
-            "X-RateLimit-Remaining": "0",
-            "X-RateLimit-Reset": str(info.get("reset", "")),
-        },
-    )
 
 
 # =============================================================================
@@ -238,85 +208,9 @@ def verify_tweet_contains_code(tweet_text: str, code: str) -> bool:
     return code.lower() in tweet_text.lower()
 
 
-def generate_api_key() -> str:
-    """Generate a secure API key."""
-    return f"mm_{secrets.token_urlsafe(32)}"
-
-
 # Global storage instance
 db = Storage()
-
-
-# =============================================================================
-# Auth (placeholder — swap for real auth later)
-# =============================================================================
-
-async def get_current_user(
-    authorization: Optional[str] = Header(None),
-    x_api_key: Optional[str] = Header(None),
-) -> dict:
-    """
-    Authenticate via API key. Returns demo-user for anonymous reads.
-    
-    Accepts:
-    - Authorization: Bearer mm_xxx
-    - X-API-Key: mm_xxx
-    """
-    api_key = None
-    
-    # Try Authorization header first
-    if authorization and authorization.startswith("Bearer "):
-        api_key = authorization[7:]
-    # Then X-API-Key header
-    elif x_api_key:
-        api_key = x_api_key
-    
-    # If we have an API key, authenticate with it
-    if api_key:
-        user = db.get_user_by_api_key(api_key)
-        if not user:
-            raise APIError(status_code=401, message="Invalid API key", code=ErrorCode.UNAUTHORIZED)
-        return user
-    
-    # X-User-ID header removed — was a security bypass that allowed unauthenticated user creation
-    # All users must now register via /agents/register and claim via twitter
-    
-    # No auth provided — use demo user for anonymous reads (read-only, zero balance)
-    user = db.get_user("demo-user")
-    if not user:
-        user = db.create_user("demo-user", "demo_user", balance=0.0)
-    return user
-
-
-async def require_auth(
-    authorization: Optional[str] = Header(None),
-    x_api_key: Optional[str] = Header(None),
-) -> dict:
-    """
-    Strict authentication required. No demo-user fallback.
-    Use this for all write operations (bets, markets, comments).
-    """
-    api_key = None
-    
-    # Try Authorization header first
-    if authorization and authorization.startswith("Bearer "):
-        api_key = authorization[7:]
-    # Then X-API-Key header
-    elif x_api_key:
-        api_key = x_api_key
-    
-    if not api_key:
-        raise APIError(
-            status_code=401,
-            message="Authentication required. Provide API key via 'Authorization: Bearer mm_xxx' or 'X-API-Key: mm_xxx' header.",
-            code=ErrorCode.UNAUTHORIZED,
-        )
-    
-    user = db.get_user_by_api_key(api_key)
-    if not user:
-        raise APIError(status_code=401, message="Invalid API key", code=ErrorCode.UNAUTHORIZED)
-    
-    return user
+init_db(db)
 
 
 # =============================================================================
@@ -392,39 +286,8 @@ app.add_exception_handler(APIError, api_error_handler)
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
-# CORS configuration — restrict origins, methods, and headers.
-# In DEBUG mode, allow all origins for local development.
-# Override origins via CORS_ORIGINS env var (comma-separated).
-_debug = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
-
-_default_origins = [
-    "https://moltmarkets.com",
-    "http://localhost:3000",
-]
-_cors_origins = os.getenv("CORS_ORIGINS")
-ALLOWED_ORIGINS = (
-    ["*"]
-    if _debug
-    else [o.strip() for o in _cors_origins.split(",") if o.strip()]
-    if _cors_origins
-    else _default_origins
-)
-
-_allowed_methods = ["GET", "POST", "OPTIONS"]
-_allowed_headers = ["Authorization", "Content-Type", "X-Idempotency-Key", "X-API-Key"]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=not _debug,  # credentials incompatible with wildcard origins
-    allow_methods=["*"] if _debug else _allowed_methods,
-    allow_headers=["*"] if _debug else _allowed_headers,
-)
-
-# Idempotency middleware — must be added AFTER CORSMiddleware so CORS
-# headers are applied even to cached/replayed responses.
-# (Starlette middleware ordering: last added = outermost = runs first)
-app.add_middleware(IdempotencyMiddleware)
+# CORS + Idempotency middleware (see middleware.py for configuration)
+configure_middleware(app)
 
 
 # =============================================================================
@@ -1669,12 +1532,6 @@ async def reset_api_key(user: dict = Depends(require_auth)):
         user_id=user["id"],
         api_key=new_key,
     )
-
-
-# Admin secret for privileged operations (MUST be set via ADMIN_SECRET env var)
-ADMIN_SECRET = os.getenv("ADMIN_SECRET")
-if not ADMIN_SECRET:
-    print("WARNING: ADMIN_SECRET not set — admin endpoints will be disabled")
 
 
 @app.delete("/admin/users/{username}", tags=["admin"])
