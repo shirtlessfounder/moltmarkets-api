@@ -2769,10 +2769,34 @@ async def get_chat_messages(limit: int = 50, since: Optional[str] = None, channe
 
 @app.get("/health")
 async def health():
+    from fastapi.responses import JSONResponse
+
+    # Verify database is reachable
+    db_status = "ok"
+    try:
+        conn = db._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        finally:
+            db._put_conn(conn)
+    except Exception:
+        db_status = "unreachable"
+
+    if db_status != "ok":
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "db": db_status,
+            },
+        )
+
     market_count = len(db.list_markets())
     user_count = len(db.users)
     return {
         "status": "ok",
+        "db": "ok",
         "markets": market_count,
         "users": user_count,
         "currency": {
