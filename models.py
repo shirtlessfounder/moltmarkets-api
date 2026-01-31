@@ -7,7 +7,51 @@ Request/response schemas for markets, trading, and users.
 from datetime import datetime
 from enum import Enum
 from typing import Optional, Dict, List
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+def to_snake_case(name: str) -> str:
+    """Convert a camelCase or PascalCase string to snake_case.
+
+    Used as ``alias_generator`` on the base model so that incoming requests
+    with camelCase keys (e.g. ``createdAt``) are transparently mapped to the
+    canonical snake_case field names.  This provides backward compatibility
+    for any client that previously sent camelCase payloads.
+
+    Examples:
+        >>> to_snake_case("createdAt")
+        'created_at'
+        >>> to_snake_case("apiKey")
+        'api_key'
+        >>> to_snake_case("already_snake")
+        'already_snake'
+    """
+    import re
+    # Insert underscore before uppercase letters that follow a lowercase letter
+    s1 = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    return s1.lower()
+
+
+class _SnakeCaseBase(BaseModel):
+    """Project-wide base model that enforces snake_case everywhere.
+
+    * ``alias_generator=to_snake_case`` — accepts camelCase input and maps
+      it to the canonical snake_case field (backward compat).
+    * ``populate_by_name=True`` — the real snake_case name is *also*
+      accepted (so existing clients aren't broken).
+    * Serialization always uses the Python field name (snake_case) because
+      ``by_alias`` defaults to ``False`` in Pydantic v2.
+
+    Every response model inherits from this class, guaranteeing that JSON
+    responses never accidentally contain camelCase keys.
+
+    See: https://github.com/shirtlessfounder/moltmarkets-api/issues/75
+    """
+
+    model_config = ConfigDict(
+        alias_generator=to_snake_case,
+        populate_by_name=True,
+    )
 
 
 # =============================================================================
@@ -30,7 +74,7 @@ class MarketStatus(str, Enum):
 # Market Models
 # =============================================================================
 
-class MarketCreate(BaseModel):
+class MarketCreate(_SnakeCaseBase):
     """Request to create a new market.
     
     Field aliases for backward compatibility:
@@ -67,12 +111,12 @@ class MarketCreate(BaseModel):
         return self
 
 
-class MarketResolve(BaseModel):
+class MarketResolve(_SnakeCaseBase):
     """Request to resolve a market."""
     outcome: Outcome
 
 
-class MarketSummary(BaseModel):
+class MarketSummary(_SnakeCaseBase):
     """Market info for list view."""
     id: str
     title: str
@@ -85,7 +129,7 @@ class MarketSummary(BaseModel):
     currency: str = "ŧ"
 
 
-class MarketDetail(BaseModel):
+class MarketDetail(_SnakeCaseBase):
     """Full market details."""
     id: str
     title: str
@@ -104,7 +148,7 @@ class MarketDetail(BaseModel):
     currency: str = "ŧ"
 
 
-class MarketCreated(BaseModel):
+class MarketCreated(_SnakeCaseBase):
     """Response after creating a market (includes guidance tips)."""
     id: str
     title: str
@@ -129,20 +173,20 @@ class MarketCreated(BaseModel):
 # Trading Models
 # =============================================================================
 
-class BetRequest(BaseModel):
+class BetRequest(_SnakeCaseBase):
     """Request to place a bet. Max 500ŧ per bet."""
     outcome: Outcome
     amount: float = Field(..., gt=0, le=500, description="Bet amount in ŧ (max 500)")
 
 
-class FeeBreakdown(BaseModel):
+class FeeBreakdown(_SnakeCaseBase):
     """Breakdown of trading fees for a transaction."""
     total_fee: float
     creator_fee: float  # Portion paid to market creator
     platform_fee: float  # Portion burned / retained by platform
 
 
-class BetResponse(BaseModel):
+class BetResponse(_SnakeCaseBase):
     """Result of placing a bet. Amounts are in points (ŧ)."""
     bet_id: str
     market_id: str
@@ -162,13 +206,13 @@ class BetResponse(BaseModel):
     currency: str = "ŧ"  # Points symbol — not real money
 
 
-class SellRequest(BaseModel):
+class SellRequest(_SnakeCaseBase):
     """Request to sell shares."""
     outcome: Outcome
     shares: float = Field(..., gt=0, le=1_000_000)
 
 
-class SellResponse(BaseModel):
+class SellResponse(_SnakeCaseBase):
     """Result of selling shares. Amounts are in points (ŧ)."""
     market_id: str
     user_id: str
@@ -181,7 +225,7 @@ class SellResponse(BaseModel):
     currency: str = "ŧ"  # Points symbol — not real money
 
 
-class Position(BaseModel):
+class Position(_SnakeCaseBase):
     """User's position in a market. Amounts are in points (ŧ)."""
     user_id: str
     market_id: str
@@ -193,7 +237,7 @@ class Position(BaseModel):
     currency: str = "ŧ"  # Points symbol — not real money
 
 
-class MarketPositions(BaseModel):
+class MarketPositions(_SnakeCaseBase):
     """All positions for a market."""
     market_id: str
     positions: List[Position]
@@ -203,7 +247,7 @@ class MarketPositions(BaseModel):
 # User Models
 # =============================================================================
 
-class UserProfile(BaseModel):
+class UserProfile(_SnakeCaseBase):
     """Public user profile."""
     id: str
     username: str
@@ -216,7 +260,7 @@ class UserProfile(BaseModel):
     twitter_handle: Optional[str] = None  # Human owner's Twitter (set after verification)
 
 
-class UserMe(BaseModel):
+class UserMe(_SnakeCaseBase):
     """Full profile for authenticated user. Balance is in points (ŧ), not real money."""
     id: str
     username: str
@@ -229,7 +273,7 @@ class UserMe(BaseModel):
     profit_all_time: float
 
 
-class PortfolioPosition(BaseModel):
+class PortfolioPosition(_SnakeCaseBase):
     """A single position in the agent's portfolio (cross-market view)."""
     market_id: str
     market_title: str
@@ -243,7 +287,7 @@ class PortfolioPosition(BaseModel):
     currency: str = "ŧ"
 
 
-class PortfolioSummary(BaseModel):
+class PortfolioSummary(_SnakeCaseBase):
     """Summary statistics for an agent's entire portfolio."""
     total_invested: float
     total_current_value: float
@@ -253,13 +297,13 @@ class PortfolioSummary(BaseModel):
     currency: str = "ŧ"
 
 
-class PortfolioResponse(BaseModel):
+class PortfolioResponse(_SnakeCaseBase):
     """Full portfolio response for GET /me/positions."""
     positions: List[PortfolioPosition]
     summary: PortfolioSummary
 
 
-class UserBetHistoryItem(BaseModel):
+class UserBetHistoryItem(_SnakeCaseBase):
     """A single bet in the agent's trade history (cross-market view)."""
     bet_id: str
     market_id: str
@@ -274,7 +318,7 @@ class UserBetHistoryItem(BaseModel):
     currency: str = "ŧ"
 
 
-class LeaderboardEntry(BaseModel):
+class LeaderboardEntry(_SnakeCaseBase):
     """Entry in the leaderboard. All amounts are in points (ŧ)."""
     user_id: str
     username: str
@@ -284,20 +328,20 @@ class LeaderboardEntry(BaseModel):
     currency: str = "ŧ"  # Points symbol — not real money
 
 
-class ProbabilityPoint(BaseModel):
+class ProbabilityPoint(_SnakeCaseBase):
     """Single point in probability history."""
     timestamp: datetime
     probability: float
     volume: float
 
 
-class MarketHistory(BaseModel):
+class MarketHistory(_SnakeCaseBase):
     """Probability history for charts."""
     market_id: str
     points: List[ProbabilityPoint]
 
 
-class BetHistoryItem(BaseModel):
+class BetHistoryItem(_SnakeCaseBase):
     """Single bet in history. Amount is in points (ŧ)."""
     bet_id: str
     user_id: str
@@ -319,14 +363,14 @@ class AgentStatus(str, Enum):
     CLAIMED = "claimed"
 
 
-class AgentRegister(BaseModel):
+class AgentRegister(_SnakeCaseBase):
     """Request to register a new agent."""
     username: str = Field(..., min_length=3, max_length=50, pattern=r'^[a-zA-Z0-9_-]+$')
     display_name: Optional[str] = Field(None, max_length=100)
     description: Optional[str] = Field(None, max_length=500)
 
 
-class AgentRegistered(BaseModel):
+class AgentRegistered(_SnakeCaseBase):
     """Response after registering an agent. Balance is in points (ŧ)."""
     user_id: str
     username: str
@@ -337,7 +381,7 @@ class AgentRegistered(BaseModel):
     created_at: datetime
 
 
-class AgentRegisteredWithClaim(BaseModel):
+class AgentRegisteredWithClaim(_SnakeCaseBase):
     """Response after registering an agent (includes claim info). Balance is in points (ŧ)."""
     user_id: str
     username: str
@@ -355,13 +399,13 @@ class AgentRegisteredWithClaim(BaseModel):
     claim_url: str  # e.g., "/claim/{user_id}"
 
 
-class AgentKeyReset(BaseModel):
+class AgentKeyReset(_SnakeCaseBase):
     """Response after resetting API key."""
     user_id: str
     api_key: str  # New key
 
 
-class ClaimPageInfo(BaseModel):
+class ClaimPageInfo(_SnakeCaseBase):
     """Info for the claim page (public, no auth)."""
     user_id: str
     username: str
@@ -370,13 +414,13 @@ class ClaimPageInfo(BaseModel):
     instructions: str
 
 
-class ClaimRequest(BaseModel):
+class ClaimRequest(_SnakeCaseBase):
     """Request to claim an agent."""
     user_id: str
     tweet_url: str = Field(..., min_length=10)
 
 
-class ClaimResponse(BaseModel):
+class ClaimResponse(_SnakeCaseBase):
     """Response after claiming an agent."""
     success: bool
     message: str
@@ -386,13 +430,13 @@ class ClaimResponse(BaseModel):
     status: AgentStatus
 
 
-class HumanRegister(BaseModel):
+class HumanRegister(_SnakeCaseBase):
     """Request to register a human user (lightweight, no Twitter verification)."""
     username: str = Field(..., min_length=3, max_length=50, pattern=r'^[a-zA-Z0-9_-]+$')
     display_name: Optional[str] = Field(None, max_length=100)
 
 
-class HumanRegistered(BaseModel):
+class HumanRegistered(_SnakeCaseBase):
     """Response after registering a human user."""
     user_id: str
     username: str
@@ -411,7 +455,7 @@ class HumanRegistered(BaseModel):
 # Reputation Models
 # =============================================================================
 
-class TradingScoreResponse(BaseModel):
+class TradingScoreResponse(_SnakeCaseBase):
     """Trading P&L reputation dimension."""
     score: float
     total_pnl: float
@@ -421,7 +465,7 @@ class TradingScoreResponse(BaseModel):
     currency: str = "ŧ"
 
 
-class ResolutionScoreResponse(BaseModel):
+class ResolutionScoreResponse(_SnakeCaseBase):
     """Resolution accuracy reputation dimension."""
     score: float
     total_votes: int
@@ -429,7 +473,7 @@ class ResolutionScoreResponse(BaseModel):
     accuracy: float
 
 
-class CreationScoreResponse(BaseModel):
+class CreationScoreResponse(_SnakeCaseBase):
     """Market creation quality reputation dimension."""
     score: float
     markets_created: int
@@ -442,7 +486,7 @@ class CreationScoreResponse(BaseModel):
     currency: str = "ŧ"
 
 
-class ParticipationScoreResponse(BaseModel):
+class ParticipationScoreResponse(_SnakeCaseBase):
     """Activity and engagement reputation dimension."""
     score: float
     total_bets: int
@@ -451,7 +495,7 @@ class ParticipationScoreResponse(BaseModel):
     comments_count: int
 
 
-class AgentReputationResponse(BaseModel):
+class AgentReputationResponse(_SnakeCaseBase):
     """Complete reputation profile for an agent."""
     agent_id: str
     username: str
@@ -467,7 +511,7 @@ class AgentReputationResponse(BaseModel):
 # Error Models
 # =============================================================================
 
-class ErrorResponse(BaseModel):
+class ErrorResponse(_SnakeCaseBase):
     """Standard error response."""
     error: str
     detail: Optional[str] = None
@@ -477,13 +521,13 @@ class ErrorResponse(BaseModel):
 # Comment Models
 # =============================================================================
 
-class CommentCreate(BaseModel):
+class CommentCreate(_SnakeCaseBase):
     """Request to create a comment."""
     content: str = Field(..., min_length=1, max_length=2000)
     parent_id: Optional[str] = None  # For replies
 
 
-class Comment(BaseModel):
+class Comment(_SnakeCaseBase):
     """A comment on a market."""
     id: str
     market_id: str
@@ -495,7 +539,7 @@ class Comment(BaseModel):
     replies: List["Comment"] = []
 
 
-class MarketComments(BaseModel):
+class MarketComments(_SnakeCaseBase):
     """All comments for a market."""
     market_id: str
     comments: List[Comment]
@@ -515,12 +559,12 @@ class ChatChannel(str, Enum):
     HUMANS = "humans"
 
 
-class ChatMessageCreate(BaseModel):
+class ChatMessageCreate(_SnakeCaseBase):
     """Request to send a chat message."""
     text: str = Field(..., min_length=1, max_length=500)
 
 
-class ChatMessage(BaseModel):
+class ChatMessage(_SnakeCaseBase):
     """A chat message."""
     id: str
     username: str
@@ -533,7 +577,7 @@ class ChatMessage(BaseModel):
 # Resolution Models (continued)
 # =============================================================================
 
-class ResolutionVote(BaseModel):
+class ResolutionVote(_SnakeCaseBase):
     """A single resolver agent's vote."""
     agent_id: str
     vote: Outcome
@@ -542,12 +586,12 @@ class ResolutionVote(BaseModel):
     created_at: datetime
 
 
-class ResolutionRequest(BaseModel):
+class ResolutionRequest(_SnakeCaseBase):
     """Request to trigger resolution committee."""
     pass  # No body needed, just triggers the process
 
 
-class ResolutionResult(BaseModel):
+class ResolutionResult(_SnakeCaseBase):
     """Result of the resolution committee vote."""
     market_id: str
     status: str  # "resolved", "disputed", "pending"
