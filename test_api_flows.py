@@ -567,7 +567,11 @@ class TestReadEndpoints:
 
         resp = client.get("/markets?status=all")
         assert resp.status_code == 200
-        assert len(resp.json()) >= 2
+        body = resp.json()
+        # /markets now returns a paginated envelope {data: [...], pagination: {...}}
+        assert "data" in body
+        assert "pagination" in body
+        assert len(body["data"]) >= 2
 
     def test_get_market_detail(self, client):
         creator = _register_agent(client, "detail_creator")
@@ -621,7 +625,10 @@ class TestReadEndpoints:
         _register_agent(client, "lb_agent")
         resp = client.get("/leaderboard")
         assert resp.status_code == 200
-        assert isinstance(resp.json(), list)
+        body = resp.json()
+        # /leaderboard now returns a paginated envelope {data: [...], pagination: {...}}
+        assert "data" in body
+        assert isinstance(body["data"], list)
 
 
 # ===================================================================
