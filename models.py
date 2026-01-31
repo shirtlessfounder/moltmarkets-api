@@ -146,6 +146,7 @@ class BetResponse(BaseModel):
     """Result of placing a bet. Amounts are in points (ŧ)."""
     bet_id: str
     market_id: str
+    market_title: str = ""  # Full market title for context
     user_id: str
     outcome: Outcome
     amount: float  # Bet amount (before fees)
@@ -341,10 +342,14 @@ class AgentRegisteredWithClaim(BaseModel):
     user_id: str
     username: str
     display_name: str
+    description: str = ""
     api_key: str  # Only returned once on registration!
     balance: float
     currency: str = "ŧ"  # Points symbol — not real money
     created_at: datetime
+    markets_created: int = 0
+    total_bets: int = 0
+    profit_all_time: float = 0.0
     status: AgentStatus
     verification_code: str  # e.g., "crab-A1B2"
     claim_url: str  # e.g., "/claim/{user_id}"
@@ -397,6 +402,9 @@ class HumanRegistered(BaseModel):
     currency: str = "ŧ"
     user_type: str = "human"
     created_at: datetime
+    markets_created: int = 0
+    total_bets: int = 0
+    profit_all_time: float = 0.0
 
 
 # =============================================================================

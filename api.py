@@ -21,6 +21,7 @@ from urllib.parse import urlparse, unquote
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from errors import error_response, APIError, ErrorCode, api_error_handler, http_exception_handler, unhandled_exception_handler
 import httpx
 import psycopg2
 from psycopg2 import pool
@@ -63,14 +64,16 @@ def set_rate_limit_headers(response: Response, info: dict) -> None:
 
 
 def raise_rate_limited(detail: str, info: dict) -> None:
-    """Raise a 429 HTTPException with Retry-After header guidance.
+    """Raise an APIError with 429 status and Retry-After header guidance.
 
     The ``info`` dict comes from ``rate_limiter.check()`` and contains the
     ``retry_after`` value in seconds.
     """
-    raise HTTPException(
+    raise APIError(
         status_code=429,
-        detail=detail,
+        message=detail,
+        code=ErrorCode.RATE_LIMITED,
+        detail={"retry_after": info.get("retry_after", 60)},
         headers={
             "Retry-After": str(info.get("retry_after", 60)),
             "X-RateLimit-Limit": str(info.get("limit", "")),
@@ -111,13 +114,14 @@ STARTING_BALANCE = 1000.0   # New agent starting balance
 
 
 def _validate_uuid(value: str, param_name: str = "id") -> None:
-    """Validate that a string is a valid UUID. Raises 400 if not."""
+    """Validate that a string is a valid UUID. Raises APIError(400) if not."""
     try:
         uuid.UUID(value)
     except (ValueError, AttributeError):
-        raise HTTPException(
+        raise APIError(
             status_code=400,
-            detail=f"Invalid {param_name}: '{value}' is not a valid UUID",
+            message=f"Invalid {param_name}: '{value}' is not a valid UUID",
+            code=ErrorCode.INVALID_INPUT,
         )
 
 
@@ -167,37 +171,42 @@ async def fetch_tweet(tweet_id: str) -> dict:
             response = await client.get(url)
             
             if response.status_code == 404:
-                raise HTTPException(
+                raise APIError(
                     status_code=400,
-                    detail="Tweet not found. It may be deleted or private."
+                    message="Tweet not found. It may be deleted or private.",
+                    code=ErrorCode.INVALID_INPUT,
                 )
             
             if response.status_code != 200:
-                raise HTTPException(
+                raise APIError(
                     status_code=502,
-                    detail=f"Failed to fetch tweet (Twitter returned {response.status_code})"
+                    message=f"Failed to fetch tweet (Twitter returned {response.status_code})",
+                    code=ErrorCode.BAD_GATEWAY,
                 )
             
             data = response.json()
             
             # Check if tweet data is valid
             if not data or "text" not in data:
-                raise HTTPException(
+                raise APIError(
                     status_code=400,
-                    detail="Tweet not accessible. It may be from a private or suspended account."
+                    message="Tweet not accessible. It may be from a private or suspended account.",
+                    code=ErrorCode.INVALID_INPUT,
                 )
             
             return data
             
         except httpx.TimeoutException:
-            raise HTTPException(
+            raise APIError(
                 status_code=504,
-                detail="Timeout while fetching tweet. Please try again."
+                message="Timeout while fetching tweet. Please try again.",
+                code=ErrorCode.GATEWAY_TIMEOUT,
             )
         except httpx.RequestError as e:
-            raise HTTPException(
+            raise APIError(
                 status_code=502,
-                detail=f"Network error while fetching tweet: {str(e)}"
+                message=f"Network error while fetching tweet: {str(e)}",
+                code=ErrorCode.BAD_GATEWAY,
             )
 
 
@@ -1627,7 +1636,7 @@ async def get_current_user(
     if api_key:
         user = db.get_user_by_api_key(api_key)
         if not user:
-            raise HTTPException(status_code=401, detail="Invalid API key")
+            raise APIError(status_code=401, message="Invalid API key", code=ErrorCode.UNAUTHORIZED)
         return user
     
     # X-User-ID header removed — was a security bypass that allowed unauthenticated user creation
@@ -1658,14 +1667,15 @@ async def require_auth(
         api_key = x_api_key
     
     if not api_key:
-        raise HTTPException(
-            status_code=401, 
-            detail="Authentication required. Provide API key via 'Authorization: Bearer mm_xxx' or 'X-API-Key: mm_xxx' header."
+        raise APIError(
+            status_code=401,
+            message="Authentication required. Provide API key via 'Authorization: Bearer mm_xxx' or 'X-API-Key: mm_xxx' header.",
+            code=ErrorCode.UNAUTHORIZED,
         )
     
     user = db.get_user_by_api_key(api_key)
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+        raise APIError(status_code=401, message="Invalid API key", code=ErrorCode.UNAUTHORIZED)
     
     return user
 
@@ -1737,6 +1747,11 @@ app = FastAPI(
         },
     ],
 )
+
+# Register exception handlers for standardized error responses (#71)
+app.add_exception_handler(APIError, api_error_handler)
+app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
 # CORS configuration — restrict origins, methods, and headers.
 # In DEBUG mode, allow all origins for local development.
@@ -1861,7 +1876,7 @@ async def get_market(market_id: str):
     _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
-        raise HTTPException(status_code=404, detail="Market not found")
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
     # Auto-transition: OPEN → RESOLVING when closes_at has passed
     now = datetime.now(timezone.utc)
@@ -1896,30 +1911,28 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
     """Create a new prediction market."""
     # Require twitter verification before creating markets
     if user.get("status") != "claimed":
-        raise HTTPException(
-            status_code=403,
-            detail="Twitter verification required before creating markets. Visit /claim/{user_id} to link your Twitter account."
-        )
+        return error_response(403,
+            "Twitter verification required before creating markets. Visit /claim/{user_id} to link your Twitter account.",
+            ErrorCode.CLAIM_REQUIRED)
     
     now = datetime.now(timezone.utc)
 
     if req.closes_at <= now:
-        raise HTTPException(status_code=400, detail="closes_at must be in the future")
+        return error_response(400, "closes_at must be in the future", ErrorCode.INVALID_INPUT)
 
     # Enforce max market duration (testing phase)
     max_close = now + timedelta(seconds=MAX_MARKET_DURATION_SECONDS)
     if req.closes_at > max_close:
-        raise HTTPException(
-            status_code=422,
-            detail="Market duration cannot exceed 1 hour during testing phase",
-        )
+        return error_response(422,
+            "Market duration cannot exceed 1 hour during testing phase",
+            ErrorCode.MARKET_DURATION_EXCEEDED)
 
     # Check creator has enough balance to fund the initial liquidity pool
     if user["balance"] < MARKET_CREATION_COST:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Insufficient balance. Market creation costs {MARKET_CREATION_COST}{CURRENCY_SYMBOL}."
-        )
+        return error_response(400,
+            f"Insufficient balance. Market creation costs {MARKET_CREATION_COST}{CURRENCY_SYMBOL}.",
+            ErrorCode.INSUFFICIENT_BALANCE,
+            detail={"balance": user["balance"], "required": MARKET_CREATION_COST})
 
     # Rate limit check: cabal members get 1-min cooldown, everyone else 30-min
     username = user.get("username", "").lower()
@@ -1932,10 +1945,10 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
         cooldown_end = last_created + timedelta(minutes=cooldown_minutes)
         if now < cooldown_end:
             remaining = (cooldown_end - now).total_seconds() / 60
-            raise HTTPException(
-                status_code=429,
-                detail=f"Rate limit: you can create another market in {remaining:.0f} minutes"
-            )
+            return error_response(429,
+                f"Rate limit: you can create another market in {remaining:.0f} minutes",
+                ErrorCode.RATE_LIMITED,
+                detail={"retry_after_minutes": round(remaining, 1)})
     
     # Deduct creation cost from creator's balance (funds the initial liquidity pool)
     db.update_user_balance(user["id"], -MARKET_CREATION_COST)
@@ -1993,13 +2006,13 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
     _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
-        raise HTTPException(status_code=404, detail="Market not found")
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
     if market["creator_id"] != user["id"]:
-        raise HTTPException(status_code=403, detail="Only creator can resolve market")
+        return error_response(403, "Only creator can resolve market", ErrorCode.FORBIDDEN)
     
     if market["status"] == MarketStatus.RESOLVED:
-        raise HTTPException(status_code=400, detail="Market already resolved")
+        return error_response(400, "Market already resolved", ErrorCode.ALREADY_RESOLVED)
     
     # Auto-transition OPEN → RESOLVING if closes_at has passed
     now = datetime.now(timezone.utc)
@@ -2054,17 +2067,16 @@ async def place_bet(market_id: str, req: BetRequest, response: Response, user: d
     _validate_uuid(market_id, "market_id")
     # Require twitter verification before trading
     if user.get("status") != "claimed":
-        raise HTTPException(
-            status_code=403,
-            detail="Twitter verification required before trading. Visit /claim/{user_id} to link your Twitter account."
-        )
+        return error_response(403,
+            "Twitter verification required before trading. Visit /claim/{user_id} to link your Twitter account.",
+            ErrorCode.CLAIM_REQUIRED)
     
     # ── Max bet amount ──
     if req.amount > MAX_BET_AMOUNT:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Bet amount {req.amount}ŧ exceeds maximum of {MAX_BET_AMOUNT}ŧ per bet.",
-        )
+        return error_response(400,
+            f"Bet amount {req.amount}ŧ exceeds maximum of {MAX_BET_AMOUNT}ŧ per bet.",
+            ErrorCode.INVALID_INPUT,
+            detail={"amount": req.amount, "max": MAX_BET_AMOUNT})
 
     # ── Rate limit: bets per agent ──
     allowed, info = rate_limiter.check(
@@ -2082,7 +2094,7 @@ async def place_bet(market_id: str, req: BetRequest, response: Response, user: d
 
     market = db.get_market(market_id)
     if not market:
-        raise HTTPException(status_code=404, detail="Market not found")
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
     # Auto-transition: OPEN → RESOLVING when closes_at has passed
     now = datetime.now(timezone.utc)
@@ -2092,20 +2104,20 @@ async def place_bet(market_id: str, req: BetRequest, response: Response, user: d
     
     if market["status"] != MarketStatus.OPEN:
         status_msg = "Market is resolving (closed, awaiting resolution)" if market["status"] == MarketStatus.RESOLVING else "Market is not open for trading"
-        raise HTTPException(status_code=400, detail=status_msg)
+        return error_response(400, status_msg, ErrorCode.MARKET_CLOSED)
     
     if market["closes_at"] <= now:
-        raise HTTPException(status_code=400, detail="Market has closed")
+        return error_response(400, "Market has closed", ErrorCode.MARKET_CLOSED)
     
     # Calculate trade fee (2% total)
     trade_fee = req.amount * TRADE_FEE_RATE
     total_cost = req.amount + trade_fee
     
     if user["balance"] < total_cost:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Insufficient balance. Need {total_cost:.2f} (bet: {req.amount:.2f} + fee: {trade_fee:.2f})"
-        )
+        return error_response(400,
+            f"Insufficient balance. Need {total_cost:.2f} (bet: {req.amount:.2f} + fee: {trade_fee:.2f})",
+            ErrorCode.INSUFFICIENT_BALANCE,
+            detail={"balance": user["balance"], "required": total_cost})
     
     # Calculate bet using CPMM
     prob_before = get_cpmm_probability(market["pool"], market["p"])
@@ -2115,7 +2127,7 @@ async def place_bet(market_id: str, req: BetRequest, response: Response, user: d
     
     shares = result["shares"]
     if shares <= 0:
-        raise HTTPException(status_code=400, detail="Trade would result in zero or negative shares")
+        return error_response(400, "Trade would result in zero or negative shares", ErrorCode.ZERO_SHARES)
     
     prob_after = get_cpmm_probability(result["new_pool"], result["new_p"])
     
@@ -2150,6 +2162,7 @@ async def place_bet(market_id: str, req: BetRequest, response: Response, user: d
     return BetResponse(
         bet_id=bet["id"],
         market_id=bet["market_id"],
+        market_title=market["title"],
         user_id=bet["user_id"],
         outcome=bet["outcome"],
         amount=bet["amount"],
@@ -2183,14 +2196,13 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
     _validate_uuid(market_id, "market_id")
     # Require twitter verification before trading
     if user.get("status") != "claimed":
-        raise HTTPException(
-            status_code=403,
-            detail="Twitter verification required before trading. Visit /claim/{user_id} to link your Twitter account."
-        )
+        return error_response(403,
+            "Twitter verification required before trading. Visit /claim/{user_id} to link your Twitter account.",
+            ErrorCode.CLAIM_REQUIRED)
     
     market = db.get_market(market_id)
     if not market:
-        raise HTTPException(status_code=404, detail="Market not found")
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
     # Auto-transition: OPEN → RESOLVING when closes_at has passed
     now = datetime.now(timezone.utc)
@@ -2200,15 +2212,15 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
     
     if market["status"] != MarketStatus.OPEN:
         status_msg = "Market is resolving (closed, awaiting resolution)" if market["status"] == MarketStatus.RESOLVING else "Market is not open for trading"
-        raise HTTPException(status_code=400, detail=status_msg)
+        return error_response(400, status_msg, ErrorCode.MARKET_CLOSED)
     
     if market["closes_at"] <= now:
-        raise HTTPException(status_code=400, detail="Market has closed")
+        return error_response(400, "Market has closed", ErrorCode.MARKET_CLOSED)
     
     # Get user's position
     position = db.get_position(market_id, user["id"])
     if not position:
-        raise HTTPException(status_code=400, detail="You have no position in this market")
+        return error_response(400, "You have no position in this market", ErrorCode.NO_POSITION)
     
     # Check if user has enough shares to sell
     if req.outcome == Outcome.YES:
@@ -2217,10 +2229,10 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
         available_shares = position["no_shares"]
     
     if available_shares < req.shares:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Insufficient shares. You have {available_shares:.2f} {req.outcome.value} shares"
-        )
+        return error_response(400,
+            f"Insufficient shares. You have {available_shares:.2f} {req.outcome.value} shares",
+            ErrorCode.INSUFFICIENT_SHARES,
+            detail={"available": available_shares, "requested": req.shares})
     
     # Calculate sale using CPMM
     prob_before = get_cpmm_probability(market["pool"], market["p"])
@@ -2230,7 +2242,7 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
     
     amount_before_fee = result["amount"]
     if amount_before_fee <= 0:
-        raise HTTPException(status_code=400, detail="Sale would result in zero or negative payout")
+        return error_response(400, "Sale would result in zero or negative payout", ErrorCode.ZERO_SHARES)
     
     # Apply trade fee (2%)
     trade_fee = amount_before_fee * TRADE_FEE_RATE
@@ -2271,7 +2283,7 @@ async def get_positions(market_id: str):
     _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
-        raise HTTPException(status_code=404, detail="Market not found")
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
     prob = get_cpmm_probability(market["pool"], market["p"])
     positions = []
@@ -2300,7 +2312,7 @@ async def get_market_history(market_id: str):
     _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
-        raise HTTPException(status_code=404, detail="Market not found")
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
     # Get all bets for this market, sorted by time
     market_bets = sorted(
@@ -2336,7 +2348,7 @@ async def get_market_bets(market_id: str):
     _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
-        raise HTTPException(status_code=404, detail="Market not found")
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
     # Single JOIN query: bets + usernames (was N+1: 1 + N get_user calls)
     market_bets = sorted(
@@ -2371,7 +2383,7 @@ async def get_comments(market_id: str):
     _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
-        raise HTTPException(status_code=404, detail="Market not found")
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
     raw_comments = db.get_market_comments(market_id)
     
@@ -2414,13 +2426,13 @@ async def create_comment(market_id: str, req: CommentCreate, user: dict = Depend
     _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
-        raise HTTPException(status_code=404, detail="Market not found")
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
     # Validate parent comment exists if replying
     if req.parent_id:
         parent_comments = db.get_market_comments(market_id)
         if not any(c["id"] == req.parent_id for c in parent_comments):
-            raise HTTPException(status_code=400, detail="Parent comment not found")
+            return error_response(400, "Parent comment not found", ErrorCode.COMMENT_NOT_FOUND)
     
     comment_id = str(uuid.uuid4())
     comment = db.create_comment(
@@ -2458,14 +2470,14 @@ async def request_resolution(market_id: str, user: dict = Depends(require_auth))
     _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
-        raise HTTPException(status_code=404, detail="Market not found")
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
     # Only creator can request resolution
     if market["creator_id"] != user["id"]:
-        raise HTTPException(status_code=403, detail="Only market creator can request resolution")
+        return error_response(403, "Only market creator can request resolution", ErrorCode.FORBIDDEN)
     
     if market["status"] == MarketStatus.RESOLVED:
-        raise HTTPException(status_code=400, detail="Market already resolved")
+        return error_response(400, "Market already resolved", ErrorCode.ALREADY_RESOLVED)
     
     # Auto-transition OPEN → RESOLVING if closes_at has passed
     now = datetime.now(timezone.utc)
@@ -2478,7 +2490,7 @@ async def request_resolution(market_id: str, user: dict = Depends(require_auth))
     brave_key = os.getenv("BRAVE_API_KEY")
     
     if not anthropic_key or not brave_key:
-        raise HTTPException(status_code=500, detail="Resolution service not configured")
+        return error_response(500, "Resolution service not configured", ErrorCode.SERVICE_UNAVAILABLE)
     
     # Run the resolution committee
     status, outcome, votes = await resolver_resolve_market(
@@ -2540,12 +2552,12 @@ async def get_resolution_votes(market_id: str):
     _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
-        raise HTTPException(status_code=404, detail="Market not found")
+        return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
     votes = db.get_resolution_votes(market_id)
     
     if not votes:
-        raise HTTPException(status_code=404, detail="No resolution votes found for this market")
+        return error_response(404, "No resolution votes found for this market", ErrorCode.NOT_FOUND)
     
     yes_votes = sum(1 for v in votes if v["vote"] == "YES")
     no_votes = sum(1 for v in votes if v["vote"] == "NO")
@@ -2709,7 +2721,7 @@ async def get_user(user_id: str):
     _validate_uuid(user_id, "user_id")
     user = db.get_user(user_id)
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        return error_response(404, "User not found", ErrorCode.USER_NOT_FOUND)
     
     return UserProfile(
         id=user["id"],
@@ -2750,7 +2762,7 @@ async def get_agent_reputation(agent_id: str):
         # Also try by username
         user = db.get_user_by_username(agent_id)
     if not user:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        return error_response(404, "Agent not found", ErrorCode.AGENT_NOT_FOUND)
     
     # Gather all data needed for reputation calculation
     # Optimized: batch queries instead of per-market N+1 loops
@@ -2848,7 +2860,7 @@ async def register_agent(req: AgentRegister, request: Request, response: Respons
     
     # Check if username is taken
     if db.get_user_by_username(username):
-        raise HTTPException(status_code=400, detail="Username already taken")
+        return error_response(400, "Username already taken", ErrorCode.ALREADY_EXISTS)
     
     # Generate API key, user ID, and verification code
     api_key = generate_api_key()
@@ -2875,9 +2887,13 @@ async def register_agent(req: AgentRegister, request: Request, response: Respons
         user_id=user["id"],
         username=user["username"],
         display_name=user["display_name"],
+        description=user.get("description", ""),
         api_key=api_key,  # Only time we return the raw key!
         balance=user["balance"],
         created_at=user["created_at"],
+        markets_created=user.get("markets_created", 0),
+        total_bets=user.get("total_bets", 0),
+        profit_all_time=user.get("profit_all_time", 0.0),
         status=AgentStatus.PENDING,
         verification_code=verification_code,
         claim_url=f"/claim/{user_id}",
@@ -2913,21 +2929,21 @@ async def admin_delete_user(username: str, request: Request, x_admin_secret: str
     Requires X-Admin-Secret header.
     """
     if not ADMIN_SECRET:
-        raise HTTPException(status_code=503, detail="Admin endpoints disabled — ADMIN_SECRET not configured")
+        return error_response(503, "Admin endpoints disabled — ADMIN_SECRET not configured", ErrorCode.SERVICE_UNAVAILABLE)
     
     # Rate limit admin endpoints to mitigate brute-force attacks
     client_ip = request.client.host if request.client else "unknown"
     allowed, info = rate_limiter.check(f"admin:{client_ip}", max_requests=10, window_seconds=60)
     if not allowed:
-        raise HTTPException(status_code=429, detail=f"Admin rate limit exceeded. {info['detail']}")
+        return error_response(429, f"Admin rate limit exceeded. {info['detail']}", ErrorCode.RATE_LIMITED)
     
     # Use constant-time comparison to prevent timing attacks (see #55)
     if not secrets.compare_digest(x_admin_secret or "", ADMIN_SECRET):
-        raise HTTPException(status_code=403, detail="Invalid admin secret")
+        return error_response(403, "Invalid admin secret", ErrorCode.FORBIDDEN)
     
     user = db.get_user_by_username(username)
     if not user:
-        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+        return error_response(404, f"User '{username}' not found", ErrorCode.USER_NOT_FOUND)
     
     # Delete user (we need to add this method)
     db.delete_user(user["id"])
@@ -2942,21 +2958,21 @@ async def admin_regenerate_api_key(username: str, request: Request, x_admin_secr
     Returns the new API key — save it, it won't be shown again!
     """
     if not ADMIN_SECRET:
-        raise HTTPException(status_code=503, detail="Admin endpoints disabled — ADMIN_SECRET not configured")
+        return error_response(503, "Admin endpoints disabled — ADMIN_SECRET not configured", ErrorCode.SERVICE_UNAVAILABLE)
     
     # Rate limit admin endpoints to mitigate brute-force attacks
     client_ip = request.client.host if request.client else "unknown"
     allowed, info = rate_limiter.check(f"admin:{client_ip}", max_requests=10, window_seconds=60)
     if not allowed:
-        raise HTTPException(status_code=429, detail=f"Admin rate limit exceeded. {info['detail']}")
+        return error_response(429, f"Admin rate limit exceeded. {info['detail']}", ErrorCode.RATE_LIMITED)
     
     # Use constant-time comparison to prevent timing attacks (see #55)
     if not secrets.compare_digest(x_admin_secret or "", ADMIN_SECRET):
-        raise HTTPException(status_code=403, detail="Invalid admin secret")
+        return error_response(403, "Invalid admin secret", ErrorCode.FORBIDDEN)
     
     user = db.get_user_by_username(username)
     if not user:
-        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+        return error_response(404, f"User '{username}' not found", ErrorCode.USER_NOT_FOUND)
     
     # Generate new API key
     new_api_key = generate_api_key()
@@ -2983,13 +2999,13 @@ async def get_claim_info(user_id: str):
     _validate_uuid(user_id, "user_id")
     user = db.get_user(user_id)
     if not user:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        return error_response(404, "Agent not found", ErrorCode.AGENT_NOT_FOUND)
     
     if not user.get("verification_code"):
-        raise HTTPException(status_code=400, detail="Agent has no verification code")
+        return error_response(400, "Agent has no verification code", ErrorCode.INVALID_INPUT)
     
     if user.get("status") == "claimed":
-        raise HTTPException(status_code=400, detail="Agent already claimed")
+        return error_response(400, "Agent already claimed", ErrorCode.ALREADY_CLAIMED)
     
     instructions = (
         f"To claim this agent, post a tweet containing the verification code: {user['verification_code']}\n\n"
@@ -3016,28 +3032,24 @@ async def claim_agent(req: ClaimRequest):
     # Get the user/agent
     user = db.get_user(req.user_id)
     if not user:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        return error_response(404, "Agent not found", ErrorCode.AGENT_NOT_FOUND)
     
     if user.get("status") == "claimed":
-        raise HTTPException(status_code=400, detail="Agent already claimed")
+        return error_response(400, "Agent already claimed", ErrorCode.ALREADY_CLAIMED)
     
     if not user.get("verification_code"):
-        raise HTTPException(status_code=400, detail="Agent has no verification code")
+        return error_response(400, "Agent has no verification code", ErrorCode.INVALID_INPUT)
     
     # Validate tweet URL format
     if not is_valid_twitter_url(req.tweet_url):
-        raise HTTPException(
-            status_code=400, 
-            detail="Invalid tweet URL. Must be a twitter.com or x.com status URL (e.g., https://twitter.com/user/status/123456)"
-        )
+        return error_response(400,
+            "Invalid tweet URL. Must be a twitter.com or x.com status URL (e.g., https://twitter.com/user/status/123456)",
+            ErrorCode.INVALID_INPUT)
     
     # Extract tweet ID from URL
     tweet_id = extract_tweet_id(req.tweet_url)
     if not tweet_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not extract tweet ID from URL"
-        )
+        return error_response(400, "Could not extract tweet ID from URL", ErrorCode.INVALID_INPUT)
     
     # Fetch the tweet content
     tweet_data = await fetch_tweet(tweet_id)
@@ -3045,11 +3057,10 @@ async def claim_agent(req: ClaimRequest):
     # Verify the tweet contains the verification code
     tweet_text = tweet_data.get("text", "")
     if not verify_tweet_contains_code(tweet_text, user["verification_code"]):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Verification failed: tweet does not contain the code '{user['verification_code']}'. "
-                   f"Please ensure your tweet includes the exact verification code."
-        )
+        return error_response(400,
+            f"Verification failed: tweet does not contain the code '{user['verification_code']}'. "
+            f"Please ensure your tweet includes the exact verification code.",
+            ErrorCode.VERIFICATION_FAILED)
     
     # Extract twitter handle from the tweet URL
     twitter_handle = extract_twitter_handle(req.tweet_url)
@@ -3103,7 +3114,7 @@ async def register_human(req: HumanRegister, request: Request, response: Respons
     
     # Check if username is taken (shared namespace with agents)
     if db.get_user_by_username(username):
-        raise HTTPException(status_code=400, detail="Username already taken")
+        return error_response(400, "Username already taken", ErrorCode.ALREADY_EXISTS)
     
     # Generate API key and user ID
     api_key = generate_api_key()
@@ -3134,6 +3145,9 @@ async def register_human(req: HumanRegister, request: Request, response: Respons
         balance=user["balance"],
         user_type="human",
         created_at=user["created_at"],
+        markets_created=user.get("markets_created", 0),
+        total_bets=user.get("total_bets", 0),
+        profit_all_time=user.get("profit_all_time", 0.0),
     )
 
 
@@ -3177,14 +3191,13 @@ async def send_chat_message(req: ChatMessageCreate, response: Response, channel:
     """
     # Validate channel
     if channel not in ("agents", "humans"):
-        raise HTTPException(status_code=400, detail="Invalid channel. Must be 'agents' or 'humans'.")
+        return error_response(400, "Invalid channel. Must be 'agents' or 'humans'.", ErrorCode.INVALID_INPUT)
     
     # Enforce humans-only restriction
     if channel == "humans" and user.get("user_type", "agent") == "agent":
-        raise HTTPException(
-            status_code=403,
-            detail="Only human users can post in the 'humans' channel. Agents can read but not write."
-        )
+        return error_response(403,
+            "Only human users can post in the 'humans' channel. Agents can read but not write.",
+            ErrorCode.FORBIDDEN)
     
     # Rate limit: chat messages per user
     allowed, info = rate_limiter.check(
@@ -3229,7 +3242,7 @@ async def get_chat_messages(limit: int = 50, since: Optional[str] = None, channe
     """
     # Validate channel
     if channel not in ("agents", "humans"):
-        raise HTTPException(status_code=400, detail="Invalid channel. Must be 'agents' or 'humans'.")
+        return error_response(400, "Invalid channel. Must be 'agents' or 'humans'.", ErrorCode.INVALID_INPUT)
     
     # Clamp limit
     if limit < 1:
@@ -3243,7 +3256,7 @@ async def get_chat_messages(limit: int = 50, since: Optional[str] = None, channe
         try:
             since_dt = datetime.fromisoformat(since.replace('Z', '+00:00'))
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid 'since' parameter. Use ISO 8601 format (e.g. 2026-01-30T23:00:00Z).")
+            return error_response(400, "Invalid 'since' parameter. Use ISO 8601 format (e.g. 2026-01-30T23:00:00Z).", ErrorCode.INVALID_INPUT)
     
     messages = db.get_chat_messages(limit=limit, since=since_dt, channel=channel)
     
@@ -3422,15 +3435,22 @@ Rate limit headers are returned on relevant responses:
 
 ## Error Format
 
-All errors return JSON:
+All errors return JSON with a machine-readable error code:
 
 ```json
 {{
-  "detail": "Human-readable error message"
+  "error": "Human-readable error message",
+  "code": "ERROR_CODE",
+  "detail": {{}}
 }}
 ```
 
-Common status codes: `400` (bad request), `401` (auth required), `404` (not found), `429` (rate limited).
+The `detail` field is optional and provides structured context (e.g., balance, retry timing).
+
+Common error codes: `MARKET_NOT_FOUND`, `INSUFFICIENT_BALANCE`, `MARKET_CLOSED`, `UNAUTHORIZED`,
+`INVALID_INPUT`, `ALREADY_EXISTS`, `RATE_LIMITED`, `INTERNAL_ERROR`, `CLAIM_REQUIRED`, `FORBIDDEN`.
+
+Common status codes: `400` (bad request), `401` (auth required), `403` (forbidden), `404` (not found), `429` (rate limited).
 """
 
 
