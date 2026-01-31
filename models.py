@@ -574,6 +574,41 @@ class ChatMessage(_SnakeCaseBase):
 
 
 # =============================================================================
+# Pagination Models
+# =============================================================================
+
+class PaginationMeta(BaseModel):
+    """Pagination metadata returned with paginated responses."""
+    limit: int
+    offset: int
+    total: int
+
+
+class PaginatedMarketSummary(BaseModel):
+    """Paginated list of market summaries."""
+    data: List[MarketSummary]
+    pagination: PaginationMeta
+
+
+class PaginatedLeaderboardEntry(BaseModel):
+    """Paginated leaderboard."""
+    data: List[LeaderboardEntry]
+    pagination: PaginationMeta
+
+
+class PaginatedChatMessage(BaseModel):
+    """Paginated chat messages."""
+    data: List[ChatMessage]
+    pagination: PaginationMeta
+
+
+class PaginatedBetHistoryItem(BaseModel):
+    """Paginated bet history for a market."""
+    data: List[BetHistoryItem]
+    pagination: PaginationMeta
+
+
+# =============================================================================
 # Resolution Models (continued)
 # =============================================================================
 
