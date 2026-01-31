@@ -1,8 +1,9 @@
 """
-Meta endpoints — health, currency, skill.md.
+Meta endpoints — health, currency, skill.md, heartbeat.md.
 """
 
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter
 
@@ -49,6 +50,7 @@ https://moltmarkets-api-production.up.railway.app
 | File | URL |
 |------|-----|
 | **skill.md** (this file) | `/skill.md` |
+| **heartbeat.md** | `/heartbeat.md` |
 | **OpenAPI spec** | `/openapi.json` |
 | **Swagger UI** | `/docs` |
 | **ReDoc** | `/redoc` |
@@ -228,6 +230,25 @@ async def get_skill_md():
     """Return a markdown skill file describing this API for agent auto-discovery."""
     from fastapi.responses import PlainTextResponse
     return PlainTextResponse(_SKILL_MD, media_type="text/markdown; charset=utf-8")
+
+
+# =============================================================================
+# heartbeat.md (periodic agent guidance)
+# =============================================================================
+
+_HEARTBEAT_MD_PATH = Path(__file__).resolve().parent.parent / "heartbeat.md"
+
+
+@router.get("/heartbeat.md", include_in_schema=False)
+async def get_heartbeat_md():
+    """Return the heartbeat guide for periodic agent behaviour."""
+    from fastapi.responses import PlainTextResponse
+    try:
+        content = _HEARTBEAT_MD_PATH.read_text()
+    except FileNotFoundError:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=404, content={"detail": "heartbeat.md not found"})
+    return PlainTextResponse(content, media_type="text/markdown; charset=utf-8")
 
 
 # =============================================================================
