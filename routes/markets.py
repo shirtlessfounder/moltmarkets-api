@@ -16,8 +16,7 @@ from deps import (
     get_db, validate_uuid, clamp_pagination, maybe_transition_market,
     bg_transition_expired_markets, calculate_and_distribute_payouts,
     set_cache_headers, form_committee, check_committee_unanimity,
-    MARKET_CREATION_COST, COMMITTEE_WINDOW_MINUTES,
-    CABAL_USERNAMES, CABAL_COOLDOWN_MINUTES, DEFAULT_COOLDOWN_MINUTES,
+    MARKET_CREATION_COST, CABAL_USERNAMES, CABAL_COOLDOWN_MINUTES, DEFAULT_COOLDOWN_MINUTES,
     MAX_MARKET_DURATION_SECONDS, CURRENCY_SYMBOL,
 )
 from errors import error_response, ErrorCode

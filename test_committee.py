@@ -16,7 +16,6 @@ Run with: python -m pytest test_committee.py -v
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -28,7 +27,6 @@ os.environ.pop("DATABASE_URL", None)
 
 from api import app, db  # noqa: E402
 from deps import (
-    STARTING_BALANCE, TRADE_FEE_RATE, MARKET_CREATION_COST,
     COMMITTEE_WINDOW_MINUTES, form_committee, check_committee_unanimity,
 )  # noqa: E402
 from models import MarketStatus, Outcome  # noqa: E402
