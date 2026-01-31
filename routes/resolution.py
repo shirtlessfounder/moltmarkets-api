@@ -9,12 +9,10 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 
 from auth import require_auth
-from cpmm import get_cpmm_probability
 from deps import (
     get_db, validate_uuid, maybe_transition_market,
     calculate_and_distribute_payouts,
     form_committee, check_committee_unanimity,
-    COMMITTEE_WINDOW_MINUTES,
 )
 from errors import error_response, ErrorCode
 from event_bus import event_bus, SSEEvent
