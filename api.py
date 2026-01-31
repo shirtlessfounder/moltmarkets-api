@@ -765,9 +765,20 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    @property
-    def users(self) -> Dict[str, dict]:
-        """Get all users (for leaderboard etc.)."""
+    def count_users(self) -> int:
+        """Return total user count without loading all rows."""
+        if self._use_memory:
+            return len(self._users)
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS cnt FROM users")
+                return cur.fetchone()["cnt"]
+        finally:
+            self._put_conn(conn)
+
+    def get_all_users(self) -> Dict[str, dict]:
+        """Get all users as dict. Loads entire table — use count_users() for counts."""
         if self._use_memory:
             return self._users
         
@@ -808,9 +819,20 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    @property
-    def markets(self) -> Dict[str, dict]:
-        """Get all markets as dict."""
+    def count_markets(self) -> int:
+        """Return total market count without loading all rows."""
+        if self._use_memory:
+            return len(self._markets)
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS cnt FROM markets")
+                return cur.fetchone()["cnt"]
+        finally:
+            self._put_conn(conn)
+
+    def get_all_markets(self) -> Dict[str, dict]:
+        """Get all markets as dict. Loads entire table — use count_markets() for counts."""
         if self._use_memory:
             return self._markets
         
@@ -985,9 +1007,8 @@ class Storage:
         finally:
             self._put_conn(conn)
     
-    @property
-    def bets(self) -> Dict[str, dict]:
-        """Get all bets as dict."""
+    def get_all_bets(self) -> Dict[str, dict]:
+        """Get all bets as dict. Loads entire table — use get_bets_for_market/user for targeted queries."""
         if self._use_memory:
             return self._bets
         
@@ -1380,8 +1401,8 @@ async def lifespan(app: FastAPI):
     # Startup: seed read-only demo user for unauthenticated access (zero balance)
     if not db.get_user("demo-user"):
         db.create_user("demo-user", "demo_user", balance=0.0)
-    market_count = len(db.list_markets())
-    user_count = len(db.users)
+    market_count = db.count_markets()
+    user_count = db.count_users()
     print(f"MoltMarkets API started with {market_count} markets, {user_count} users")
     yield
     # Shutdown
@@ -2250,8 +2271,8 @@ async def get_agent_reputation(agent_id: str):
     
     # Gather all data needed for reputation calculation
     user_bets = db.get_bets_for_user(user["id"])
-    markets = db.markets
-    all_bets_dict = db.bets
+    markets = db.get_all_markets()
+    all_bets_dict = db.get_all_bets()
     all_bets = list(all_bets_dict.values())
     
     # Gather resolution votes
@@ -2627,9 +2648,9 @@ async def register_human(req: HumanRegister, request: Request):
 async def get_leaderboard():
     """Get leaderboard sorted by profit (only shows claimed/verified agents)."""
     entries = []
-    all_users = db.users
-    all_bets = db.bets
-    all_markets = db.markets
+    all_users = db.get_all_users()
+    all_bets = db.get_all_bets()
+    all_markets = db.get_all_markets()
     
     for user in all_users.values():
         # Only include claimed/verified agents in leaderboard
@@ -2774,8 +2795,8 @@ async def get_chat_messages(limit: int = 50, since: Optional[str] = None, channe
 
 @app.get("/health")
 async def health():
-    market_count = len(db.list_markets())
-    user_count = len(db.users)
+    market_count = db.count_markets()
+    user_count = db.count_users()
     return {
         "status": "ok",
         "markets": market_count,
