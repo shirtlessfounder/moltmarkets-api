@@ -18,7 +18,7 @@ See issue #45 for context.
 import hashlib
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 # Default cache TTL in seconds. Short because markets are live-trading
 # instruments where probability/volume change with every bet.
@@ -83,8 +83,12 @@ class MarketListCache:
 
         return entry
 
-    def set(self, status_filter: str, data: List[Any]) -> dict:
+    def set(self, status_filter: str, data: Any) -> dict:
         """Store a cache entry and compute its ETag.
+
+        Accepts either a plain list or a paginated response object (with a
+        ``.data`` attribute).  The full object is stored so cache hits can
+        return it directly; the ETag is computed from the inner list length.
 
         Returns the entry dict (with etag) so callers can use it
         immediately for response headers.
@@ -108,15 +112,19 @@ class MarketListCache:
         self._generation += 1
         self._last_modified = datetime.now(timezone.utc)
 
-    def _compute_etag(self, data: List[Any], status_filter: str) -> str:
+    def _compute_etag(self, data: Any, status_filter: str) -> str:
         """Compute a weak ETag for the response data.
 
         Uses generation + status_filter + data length as a fast fingerprint.
         We don't hash the full payload (expensive for large lists) — the
         generation counter already guarantees uniqueness after invalidation.
+
+        Handles both plain lists and paginated response objects (with a
+        ``.data`` attribute containing the inner list).
         """
-        # Include generation so ETags change after any mutation
-        fingerprint = f"{self._generation}:{status_filter}:{len(data)}"
+        # Support paginated wrapper objects (PaginatedMarketSummary, etc.)
+        inner = data.data if hasattr(data, "data") else data
+        fingerprint = f"{self._generation}:{status_filter}:{len(inner)}"
         digest = hashlib.md5(fingerprint.encode()).hexdigest()[:16]
         return f'W/"{digest}"'
 
