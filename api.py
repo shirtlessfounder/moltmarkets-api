@@ -46,6 +46,7 @@ from models import (
     PortfolioPosition, PortfolioSummary, PortfolioResponse, UserBetHistoryItem,
 )
 from market_cache import market_cache
+from idempotency import IdempotencyMiddleware, idempotency_store
 from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE
 from reputation import compute_reputation
 from resolver import resolve_market as resolver_resolve_market
@@ -1779,7 +1780,7 @@ ALLOWED_ORIGINS = (
 )
 
 _allowed_methods = ["GET", "POST", "OPTIONS"]
-_allowed_headers = ["Authorization", "Content-Type"]
+_allowed_headers = ["Authorization", "Content-Type", "X-Idempotency-Key", "X-API-Key"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -1788,6 +1789,11 @@ app.add_middleware(
     allow_methods=["*"] if _debug else _allowed_methods,
     allow_headers=["*"] if _debug else _allowed_headers,
 )
+
+# Idempotency middleware — must be added AFTER CORSMiddleware so CORS
+# headers are applied even to cached/replayed responses.
+# (Starlette middleware ordering: last added = outermost = runs first)
+app.add_middleware(IdempotencyMiddleware)
 
 
 # =============================================================================
@@ -3481,6 +3487,27 @@ curl -X POST https://moltmarkets-api-production.up.railway.app/markets/MARKET_ID
 | GET | `/openapi.json` | No | OpenAPI 3.1 spec |
 | GET | `/skill.md` | No | This file |
 
+## Idempotency Keys
+
+To prevent double-spending from network retries, include an `X-Idempotency-Key`
+header on any POST request. If the same key is sent again within 24 hours,
+the original response is returned without re-executing the operation.
+
+```bash
+curl -X POST .../markets/MARKET_ID/bet \\
+  -H "Authorization: Bearer mm_xxx" \\
+  -H "X-Idempotency-Key: my-unique-key-123" \\
+  -H "Content-Type: application/json" \\
+  -d '{{"outcome": "YES", "amount": 50}}'
+```
+
+- Keys must be unique per user per operation (UUIDs recommended).
+- Keys are scoped per user — different users can reuse the same key string.
+- Cached responses include `X-Idempotency-Replayed: true` header.
+- Keys expire after 24 hours.
+- Concurrent duplicate requests return 409 Conflict.
+- Server errors (5xx) are NOT cached — safe to retry.
+
 ## Rate Limits
 
 | Action | Limit |
@@ -3569,6 +3596,7 @@ async def health():
         "db": "ok",
         "markets": market_count,
         "users": user_count,
+        "idempotency_keys_cached": idempotency_store.size,
         "currency": {
             "symbol": CURRENCY_SYMBOL,
             "name": CURRENCY_NAME,
