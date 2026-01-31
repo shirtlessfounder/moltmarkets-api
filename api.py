@@ -811,6 +811,40 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    def list_markets_with_creators(self) -> List[dict]:
+        """List all markets with creator usernames in a single JOIN query.
+        
+        Eliminates N+1: previously list_markets + N × get_user calls.
+        Now: 1 query total.
+        """
+        if self._use_memory:
+            results = []
+            for m in self._markets.values():
+                market = dict(m)
+                creator = self._users.get(m["creator_id"])
+                market["creator_username"] = creator["username"] if creator else None
+                results.append(market)
+            return results
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT m.*, u.username AS creator_username
+                    FROM markets m
+                    LEFT JOIN users u ON m.creator_id = u.id
+                    ORDER BY m.created_at DESC
+                """)
+                rows = cur.fetchall()
+                results = []
+                for row in rows:
+                    market = self._row_to_market(row)
+                    market["creator_username"] = row.get("creator_username")
+                    results.append(market)
+                return results
+        finally:
+            self._put_conn(conn)
+    
     @property
     def markets(self) -> Dict[str, dict]:
         """Get all markets as dict."""
@@ -974,6 +1008,42 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    def get_bets_for_market_with_users(self, market_id: str) -> List[dict]:
+        """Get all bets for a market with user info in a single JOIN query.
+        
+        Eliminates N+1: previously get_bets_for_market + N × get_user calls.
+        Now: 1 query total.
+        """
+        if self._use_memory:
+            results = []
+            for b in self._bets.values():
+                if b["market_id"] == market_id:
+                    bet = dict(b)
+                    user = self._users.get(b["user_id"])
+                    bet["username"] = user["username"] if user else "unknown"
+                    results.append(bet)
+            return results
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT b.*, u.username
+                    FROM bets b
+                    LEFT JOIN users u ON b.user_id = u.id
+                    WHERE b.market_id = %s
+                    ORDER BY b.created_at
+                """, (market_id,))
+                rows = cur.fetchall()
+                results = []
+                for row in rows:
+                    bet = self._row_to_bet(row)
+                    bet["username"] = row.get("username") or "unknown"
+                    results.append(bet)
+                return results
+        finally:
+            self._put_conn(conn)
+    
     def get_bets_for_user(self, user_id: str) -> List[dict]:
         """Get all bets for a user."""
         if self._use_memory:
@@ -1000,6 +1070,144 @@ class Storage:
                 cur.execute("SELECT * FROM bets")
                 rows = cur.fetchall()
                 return {row["id"]: self._row_to_bet(row) for row in rows}
+        finally:
+            self._put_conn(conn)
+    
+    def get_leaderboard_data(self) -> List[dict]:
+        """Get leaderboard data using aggregate SQL query.
+        
+        Eliminates N+1: previously loaded ALL users + ALL bets + ALL markets
+        into memory, then did O(users × bets) Python iteration.
+        Now: 1 query with CTEs for volume and win rate aggregation.
+        """
+        if self._use_memory:
+            # Fallback: in-memory calculation (same logic, just organized)
+            entries = []
+            for user in self._users.values():
+                if user.get("status") != "claimed":
+                    continue
+                total_volume = sum(
+                    b["amount"] for b in self._bets.values()
+                    if b["user_id"] == user["id"]
+                )
+                user_bets = [b for b in self._bets.values() if b["user_id"] == user["id"]]
+                wins = 0
+                resolved_bets = 0
+                for bet in user_bets:
+                    market = self._markets.get(bet["market_id"])
+                    if market and market["status"] == MarketStatus.RESOLVED:
+                        resolved_bets += 1
+                        if market["resolution"] == bet["outcome"]:
+                            wins += 1
+                win_rate = wins / resolved_bets if resolved_bets > 0 else 0.5
+                entries.append({
+                    "user_id": user["id"],
+                    "username": user["username"],
+                    "pnl": user["profit_all_time"],
+                    "total_volume": total_volume,
+                    "win_rate": win_rate,
+                })
+            entries.sort(key=lambda x: x["pnl"], reverse=True)
+            return entries[:50]
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    WITH user_volumes AS (
+                        SELECT user_id, COALESCE(SUM(amount), 0) AS total_volume
+                        FROM bets
+                        GROUP BY user_id
+                    ),
+                    user_win_rates AS (
+                        SELECT 
+                            b.user_id,
+                            COUNT(*) AS resolved_bets,
+                            SUM(CASE WHEN UPPER(m.resolution) = UPPER(b.outcome) THEN 1 ELSE 0 END) AS wins
+                        FROM bets b
+                        JOIN markets m ON b.market_id = m.id
+                        WHERE UPPER(m.status) = 'RESOLVED'
+                        GROUP BY b.user_id
+                    )
+                    SELECT 
+                        u.id AS user_id,
+                        u.username,
+                        u.profit_all_time AS pnl,
+                        COALESCE(v.total_volume, 0) AS total_volume,
+                        CASE 
+                            WHEN COALESCE(w.resolved_bets, 0) > 0 
+                            THEN w.wins::float / w.resolved_bets 
+                            ELSE 0.5 
+                        END AS win_rate
+                    FROM users u
+                    LEFT JOIN user_volumes v ON u.id = v.user_id
+                    LEFT JOIN user_win_rates w ON u.id = w.user_id
+                    WHERE u.status = 'claimed'
+                    ORDER BY u.profit_all_time DESC
+                    LIMIT 50
+                """)
+                rows = cur.fetchall()
+                return [
+                    {
+                        "user_id": row["user_id"],
+                        "username": row["username"],
+                        "pnl": float(row["pnl"]),
+                        "total_volume": float(row["total_volume"]),
+                        "win_rate": float(row["win_rate"]),
+                    }
+                    for row in rows
+                ]
+        finally:
+            self._put_conn(conn)
+    
+    def get_reputation_data(self, user_id: str) -> dict:
+        """Get all data needed for reputation calculation in minimal queries.
+        
+        Eliminates N+1: previously looped through ALL markets to fetch
+        resolution votes and comments individually (2N extra queries).
+        Now: 3 targeted queries instead of 2N+3.
+        """
+        if self._use_memory:
+            # Fallback for in-memory storage
+            all_resolution_votes = []
+            if hasattr(self, '_resolution_votes'):
+                for votes in self._resolution_votes.values():
+                    all_resolution_votes.extend(votes)
+            comments_count = 0
+            if hasattr(self, '_comments'):
+                comments_count = sum(1 for c in self._comments.values() if c.get("user_id") == user_id)
+            return {
+                "resolution_votes": all_resolution_votes,
+                "comments_count": comments_count,
+            }
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                # Single query for all resolution votes (not per-market)
+                cur.execute("""
+                    SELECT * FROM resolution_votes
+                    ORDER BY created_at ASC
+                """)
+                rows = cur.fetchall()
+                all_resolution_votes = [
+                    {
+                        **dict(row),
+                        "sources": json.loads(row["sources"]) if row["sources"] else []
+                    }
+                    for row in rows
+                ]
+                
+                # Single query for user's comment count
+                cur.execute("""
+                    SELECT COUNT(*) AS cnt FROM comments WHERE user_id = %s
+                """, (user_id,))
+                comments_count = cur.fetchone()["cnt"]
+                
+                return {
+                    "resolution_votes": all_resolution_votes,
+                    "comments_count": comments_count,
+                }
         finally:
             self._put_conn(conn)
     
@@ -1432,7 +1640,8 @@ async def list_markets(status: Optional[str] = None):
             - "closed" or "resolved" → resolved markets
             - "all"             → all markets regardless of status
     """
-    markets = db.list_markets()
+    # Single JOIN query: markets + creator usernames (was N+1: 1 + N get_user calls)
+    markets = db.list_markets_with_creators()
 
     # Auto-transition: move OPEN markets past closes_at to RESOLVING
     now = datetime.now(timezone.utc)
@@ -1454,10 +1663,6 @@ async def list_markets(status: Optional[str] = None):
         markets = [m for m in markets if m["status"] == MarketStatus.OPEN]
     result = []
     for m in markets:
-        # Look up creator username
-        creator = db.get_user(m["creator_id"]) if m["creator_id"] else None
-        creator_username = creator["username"] if creator else None
-        
         result.append(MarketSummary(
             id=m["id"],
             title=m["title"],
@@ -1466,7 +1671,7 @@ async def list_markets(status: Optional[str] = None):
             closes_at=m["closes_at"],
             total_volume=m["total_volume"],
             creator_id=m["creator_id"],
-            creator_username=creator_username,
+            creator_username=m.get("creator_username"),
         ))
     return result
 
@@ -1946,19 +2151,19 @@ async def get_market_bets(market_id: str):
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
     
+    # Single JOIN query: bets + usernames (was N+1: 1 + N get_user calls)
     market_bets = sorted(
-        db.get_bets_for_market(market_id),
+        db.get_bets_for_market_with_users(market_id),
         key=lambda x: x["created_at"],
         reverse=True  # Most recent first
     )
     
     items = []
     for bet in market_bets:
-        user = db.get_user(bet["user_id"])
         items.append(BetHistoryItem(
             bet_id=bet["id"],
             user_id=bet["user_id"],
-            username=user["username"] if user else "unknown",
+            username=bet.get("username", "unknown"),
             outcome=bet["outcome"],
             amount=bet["amount"],
             shares=bet["shares"],
@@ -2264,22 +2469,17 @@ async def get_agent_reputation(agent_id: str):
         raise HTTPException(status_code=404, detail="Agent not found")
     
     # Gather all data needed for reputation calculation
+    # Optimized: batch queries instead of per-market N+1 loops
     user_bets = db.get_bets_for_user(user["id"])
     markets = db.markets
     all_bets_dict = db.bets
     all_bets = list(all_bets_dict.values())
     
-    # Gather resolution votes
-    all_resolution_votes = []
-    for market_id in markets:
-        votes = db.get_resolution_votes(market_id)
-        all_resolution_votes.extend(votes)
-    
-    # Count comments by this user
-    comments_count = 0
-    for market_id in markets:
-        market_comments = db.get_market_comments(market_id)
-        comments_count += sum(1 for c in market_comments if c.get("user_id") == user["id"])
+    # Single batch queries for resolution votes + comment count
+    # (was N+1: looped ALL markets calling get_resolution_votes + get_market_comments each)
+    rep_data = db.get_reputation_data(user["id"])
+    all_resolution_votes = rep_data["resolution_votes"]
+    comments_count = rep_data["comments_count"]
     
     # Compute reputation
     rep = compute_reputation(
@@ -2657,47 +2857,19 @@ async def register_human(req: HumanRegister, request: Request):
 @app.get("/leaderboard", response_model=List[LeaderboardEntry])
 async def get_leaderboard():
     """Get leaderboard sorted by profit (only shows claimed/verified agents)."""
-    entries = []
-    all_users = db.users
-    all_bets = db.bets
-    all_markets = db.markets
+    # Single aggregate query with CTEs (was: 3 full-table loads + O(users × bets) iteration)
+    leaderboard_data = db.get_leaderboard_data()
     
-    for user in all_users.values():
-        # Only include claimed/verified agents in leaderboard
-        if user.get("status") != "claimed":
-            continue
-        # Calculate total volume from bets
-        total_volume = sum(
-            bet["amount"] 
-            for bet in all_bets.values() 
-            if bet["user_id"] == user["id"]
+    return [
+        LeaderboardEntry(
+            user_id=entry["user_id"],
+            username=entry["username"],
+            pnl=entry["pnl"],
+            total_volume=entry["total_volume"],
+            win_rate=entry["win_rate"],
         )
-        
-        # Calculate win rate (simplified: resolved bets where user had winning position)
-        user_bets = [b for b in all_bets.values() if b["user_id"] == user["id"]]
-        wins = 0
-        resolved_bets = 0
-        
-        for bet in user_bets:
-            market = all_markets.get(bet["market_id"])
-            if market and market["status"] == MarketStatus.RESOLVED:
-                resolved_bets += 1
-                if market["resolution"] == bet["outcome"]:
-                    wins += 1
-        
-        win_rate = wins / resolved_bets if resolved_bets > 0 else 0.5
-        
-        entries.append(LeaderboardEntry(
-            user_id=user["id"],
-            username=user["username"],
-            pnl=user["profit_all_time"],
-            total_volume=total_volume,
-            win_rate=win_rate,
-        ))
-    
-    # Sort by PNL descending
-    entries.sort(key=lambda x: x.pnl, reverse=True)
-    return entries[:50]  # Top 50
+        for entry in leaderboard_data
+    ]
 
 
 # =============================================================================
