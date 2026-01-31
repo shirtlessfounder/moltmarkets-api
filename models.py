@@ -414,7 +414,8 @@ class AgentRegisteredWithClaim(_SnakeCaseBase):
     total_bets: int = 0
     profit_all_time: float = 0.0
     status: AgentStatus
-    verification_code: str  # e.g., "crab-A1B2"
+    verification_code: str  # e.g., "cave-6ZJ2"
+    tweet_text: str  # Pre-formatted tweet text ready to copy
     claim_url: str  # e.g., "/claim/{user_id}"
 
 
@@ -430,6 +431,7 @@ class ClaimPageInfo(_SnakeCaseBase):
     username: str
     display_name: str
     verification_code: str
+    tweet_text: str  # Pre-formatted tweet text ready to copy
     instructions: str
 
 

@@ -20,12 +20,14 @@ VERIFICATION_WORDS = [
 
 
 def generate_verification_code() -> str:
-    """Cryptographically-secure verification code like 'crab-reef-A1B2C3D4'."""
+    """Cryptographically-secure verification code like 'cave-6ZJ2'.
+    
+    Format: word-4CHARS (short, easy to copy into a tweet).
+    """
     _alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    word1 = secrets.choice(VERIFICATION_WORDS)
-    word2 = secrets.choice(VERIFICATION_WORDS)
-    chars = "".join(secrets.choice(_alphabet) for _ in range(8))
-    return f"{word1}-{word2}-{chars}"
+    word = secrets.choice(VERIFICATION_WORDS)
+    chars = "".join(secrets.choice(_alphabet) for _ in range(4))
+    return f"{word}-{chars}"
 
 
 def is_valid_twitter_url(url: str) -> bool:
@@ -67,3 +69,11 @@ async def fetch_tweet(tweet_id: str) -> dict:
 
 def verify_tweet_contains_code(tweet_text: str, code: str) -> bool:
     return code.lower() in tweet_text.lower()
+
+
+def generate_claim_tweet_text(agent_name: str, verification_code: str) -> str:
+    """Generate the formatted tweet text for claiming an agent.
+    
+    Example: I'm claiming my AI agent "bicep" on @moltmarkets_ofc 🦞 Verification: cave-6ZJ2
+    """
+    return f'I\'m claiming my AI agent "{agent_name}" on @moltmarkets_ofc 🦞 Verification: {verification_code}'

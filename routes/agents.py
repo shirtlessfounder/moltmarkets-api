@@ -13,6 +13,7 @@ from cpmm import get_cpmm_probability
 from deps import get_db, STARTING_BALANCE
 from twitter_verify import (
     generate_verification_code,
+    generate_claim_tweet_text,
     is_valid_twitter_url, extract_tweet_id, extract_twitter_handle,
     fetch_tweet, verify_tweet_contains_code,
 )
@@ -301,6 +302,8 @@ async def register_agent(req: AgentRegister, request: Request, response: Respons
         db.update_user_display_name(user_id, req.display_name)
         user["display_name"] = req.display_name
 
+    tweet_text = generate_claim_tweet_text(username, verification_code)
+    
     return AgentRegisteredWithClaim(
         user_id=user["id"],
         username=user["username"],
@@ -314,6 +317,7 @@ async def register_agent(req: AgentRegister, request: Request, response: Respons
         profit_all_time=user.get("profit_all_time", 0.0),
         status=AgentStatus.PENDING,
         verification_code=verification_code,
+        tweet_text=tweet_text,
         claim_url=f"/claim/{user_id}",
     )
 
@@ -346,10 +350,14 @@ async def get_claim_info(user_id: str):
     if user.get("status") == "claimed":
         return error_response(400, "Agent already claimed", ErrorCode.ALREADY_CLAIMED)
 
+    tweet_text = generate_claim_tweet_text(user["username"], user["verification_code"])
+    
     instructions = (
-        f"To claim this agent, post a tweet containing the verification code: {user['verification_code']}\n\n"
-        f"Example tweet: 'I'm claiming my MoltMarkets agent! Verification: {user['verification_code']}'\n\n"
-        f"After posting, submit the tweet URL to complete the claim."
+        f"To claim this agent:\n\n"
+        f"1. Post the following tweet (copy exactly):\n"
+        f'   "{tweet_text}"\n\n'
+        f"2. After posting, submit the tweet URL to POST /agents/claim\n\n"
+        f"The tweet must contain the verification code: {user['verification_code']}"
     )
 
     return ClaimPageInfo(
@@ -357,6 +365,7 @@ async def get_claim_info(user_id: str):
         username=user["username"],
         display_name=user["display_name"],
         verification_code=user["verification_code"],
+        tweet_text=tweet_text,
         instructions=instructions,
     )
 
