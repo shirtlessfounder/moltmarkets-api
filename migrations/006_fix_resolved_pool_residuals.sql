@@ -1,0 +1,45 @@
+-- Migration 006: Fix resolved market pool residuals
+--
+-- Problem: When markets resolve, the winning-side pool shares (initial
+-- liquidity from market creation) remain locked in the pool forever.
+-- This means:
+--   1. ~1055ŧ in winning shares stuck in resolved market pools
+--   2. Probability reads incorrectly (not 0 or 1) for resolved markets
+--   3. Positions not zeroed after payout (double-counting in portfolios)
+--
+-- This migration is provided for documentation. The actual fix is applied
+-- via the /admin/fix-resolutions endpoint which handles balance credits
+-- and position zeroing atomically.
+--
+-- To see what would change (dry run):
+--   curl -X POST /admin/fix-resolutions?dry_run=true \
+--        -H "X-Admin-Secret: $ADMIN_SECRET"
+--
+-- To apply:
+--   curl -X POST /admin/fix-resolutions?dry_run=false \
+--        -H "X-Admin-Secret: $ADMIN_SECRET"
+--
+-- Manual SQL equivalent (POOL FIX ONLY — does NOT credit balances):
+--
+-- Set terminal pool state for YES-resolved markets:
+-- UPDATE markets
+-- SET pool_yes = 0, pool_no = 1
+-- WHERE UPPER(status) = 'RESOLVED' AND UPPER(resolution) = 'YES'
+--   AND pool_yes > 0.001;
+--
+-- Set terminal pool state for NO-resolved markets:
+-- UPDATE markets
+-- SET pool_yes = 1, pool_no = 0
+-- WHERE UPPER(status) = 'RESOLVED' AND UPPER(resolution) = 'NO'
+--   AND pool_no > 0.001;
+--
+-- Zero out positions for all resolved markets:
+-- UPDATE positions
+-- SET yes_shares = 0, no_shares = 0
+-- WHERE market_id IN (
+--   SELECT id FROM markets WHERE UPPER(status) = 'RESOLVED'
+-- );
+
+-- No-op: this migration is documentation-only.
+-- The fix is applied via the admin API endpoint.
+SELECT 1;
