@@ -8,8 +8,10 @@ Currency: Points (ŧ) — not real money. All balances and amounts are denominat
 """
 
 import os
+import sys
 import json
 import uuid
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
@@ -18,6 +20,48 @@ from urllib.parse import urlparse, unquote
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
+
+
+# =============================================================================
+# Structured Logging Setup
+# =============================================================================
+# JSON-formatted logs for Railway log viewer compatibility.
+# Uses stdlib logging — no extra dependencies.
+
+class JSONFormatter(logging.Formatter):
+    """Emit one JSON object per log line for structured log aggregation."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        log_entry: dict = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "logger": record.name,
+        }
+        # Attach any extra context passed via `extra={...}`
+        for key in ("endpoint", "user_id", "market_id", "username",
+                     "client_ip", "method", "status_code", "detail"):
+            value = getattr(record, key, None)
+            if value is not None:
+                log_entry[key] = value
+        if record.exc_info and record.exc_info[0] is not None:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_entry, default=str)
+
+
+def _configure_logging() -> logging.Logger:
+    """Return the application logger with JSON output on stdout."""
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(JSONFormatter())
+    _logger = logging.getLogger("moltmarkets")
+    _logger.setLevel(getattr(logging, log_level, logging.INFO))
+    _logger.addHandler(handler)
+    _logger.propagate = False
+    return _logger
+
+
+logger = _configure_logging()
 
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability, Outcome as CpmmOutcome
 from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE
@@ -227,7 +271,7 @@ class Storage:
             self._init_pool()
             self._init_db()
         else:
-            print("Warning: DATABASE_URL not set, using in-memory storage (data will be lost on restart)")
+            logger.warning("DATABASE_URL not set — falling back to in-memory storage (data will be lost on restart)")
             # Fallback to in-memory for local dev without DB
             self._use_memory = True
             self._markets: Dict[str, dict] = {}
@@ -259,7 +303,9 @@ class Storage:
             keepalives_count=3,          # Give up after 3 missed keepalives
             options='-c statement_timeout=30000',  # 30s query timeout
         )
-        print("Connection pool initialized (min=1, max=10, keepalives=on, statement_timeout=30s)")
+        logger.info("Connection pool initialized", extra={
+            "detail": "min=1, max=10, keepalives=on, statement_timeout=30s",
+        })
     
     def _get_conn(self):
         """Get a database connection from the pool.
@@ -465,7 +511,7 @@ class Storage:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users(LOWER(username))")
                 
                 conn.commit()
-                print("Database tables initialized")
+                logger.info("Database tables initialized")
         finally:
             self._put_conn(conn)
     
@@ -1644,10 +1690,13 @@ async def lifespan(app: FastAPI):
         db.create_user("demo-user", "demo_user", balance=0.0)
     market_count = len(db.list_markets())
     user_count = len(db.users)
-    print(f"MoltMarkets API started with {market_count} markets, {user_count} users")
+    logger.info("MoltMarkets API started", extra={
+        "endpoint": "lifespan/startup",
+        "detail": f"{market_count} markets, {user_count} users",
+    })
     yield
     # Shutdown
-    print("MoltMarkets API shutting down")
+    logger.info("MoltMarkets API shutting down", extra={"endpoint": "lifespan/shutdown"})
 
 
 app = FastAPI(
@@ -2799,7 +2848,7 @@ async def reset_api_key(user: dict = Depends(require_auth)):
 # Admin secret for privileged operations (MUST be set via ADMIN_SECRET env var)
 ADMIN_SECRET = os.getenv("ADMIN_SECRET")
 if not ADMIN_SECRET:
-    print("WARNING: ADMIN_SECRET not set — admin endpoints will be disabled")
+    logger.warning("ADMIN_SECRET not set — admin endpoints will be disabled")
 
 
 @app.delete("/admin/users/{username}")
@@ -3191,21 +3240,22 @@ async def get_currency():
 if __name__ == "__main__":
     import asyncio
     
-    print("=" * 60)
-    print("MoltMarkets API - Quick Test")
-    print("=" * 60)
+    logger.info("MoltMarkets API — Quick Test", extra={"endpoint": "__main__"})
     
     async def run_test():
         # Simulate requests without running actual server
         
         # 1. Create a user
-        print("\n1. Creating demo user...")
+        logger.debug("Creating demo user...", extra={"endpoint": "__main__"})
         db.create_user("test-user", "test_user", balance=STARTING_BALANCE)
         user = db.get_user("test-user")
-        print(f"   User: {user['username']}, Balance: {user['balance']}ŧ")
+        logger.info("Demo user created", extra={
+            "endpoint": "__main__", "username": user["username"],
+            "detail": f"balance={user['balance']}ŧ",
+        })
         
         # 2. Create a market
-        print("\n2. Creating a market...")
+        logger.debug("Creating a market...", extra={"endpoint": "__main__"})
         from datetime import timedelta
         market_id = str(uuid.uuid4())
         market = db.create_market(
@@ -3217,11 +3267,13 @@ if __name__ == "__main__":
             initial_liquidity=100.0,
         )
         prob = get_cpmm_probability(market["pool"], market["p"])
-        print(f"   Market: {market['title'][:40]}...")
-        print(f"   Pool: {market['pool']}, Probability: {prob:.2%}")
+        logger.info("Market created", extra={
+            "endpoint": "__main__", "market_id": market_id,
+            "detail": f"title={market['title'][:40]}… pool={market['pool']} prob={prob:.2%}",
+        })
         
         # 3. Place a YES bet
-        print("\n3. Placing 50ŧ bet on YES...")
+        logger.debug("Placing 50ŧ bet on YES...", extra={"endpoint": "__main__", "market_id": market_id})
         state = CpmmState(pool=market["pool"].copy(), p=market["p"])
         result = calculate_cpmm_purchase(state, 50, "YES")
         
@@ -3231,27 +3283,26 @@ if __name__ == "__main__":
         db.update_position(market_id, "test-user", Outcome.YES, shares, 50)
         
         new_prob = get_cpmm_probability(result["new_pool"], result["new_p"])
-        print(f"   Shares received: {shares:.2f}")
-        print(f"   Avg price: {50/shares:.4f}ŧ per share")
-        print(f"   Probability: {prob:.2%} → {new_prob:.2%}")
+        logger.info("Bet placed", extra={
+            "endpoint": "__main__", "market_id": market_id,
+            "detail": f"shares={shares:.2f} avg_price={50/shares:.4f}ŧ prob={prob:.2%}→{new_prob:.2%}",
+        })
         
         # 4. Check position
-        print("\n4. Checking position...")
         pos = db.get_position(market_id, "test-user")
         current_value = pos["yes_shares"] * new_prob
-        print(f"   YES shares: {pos['yes_shares']:.2f}")
-        print(f"   Total invested: {pos['total_invested']:.2f}ŧ")
-        print(f"   Current value: {current_value:.2f}ŧ")
-        print(f"   P&L: {current_value - pos['total_invested']:.2f}ŧ")
+        logger.info("Position check", extra={
+            "endpoint": "__main__", "market_id": market_id,
+            "detail": f"yes_shares={pos['yes_shares']:.2f} invested={pos['total_invested']:.2f}ŧ value={current_value:.2f}ŧ pnl={current_value - pos['total_invested']:.2f}ŧ",
+        })
         
         # 5. Check user balance
-        print("\n5. Checking user balance...")
         user = db.get_user("test-user")
-        print(f"   Balance: {user['balance']:.2f}ŧ")
-        print(f"   Total bets: {user['total_bets']}")
+        logger.info("Balance check", extra={
+            "endpoint": "__main__", "username": user["username"],
+            "detail": f"balance={user['balance']:.2f}ŧ total_bets={user['total_bets']}",
+        })
         
-        print("\n" + "=" * 60)
-        print("Test complete! Run with: uvicorn api:app --reload")
-        print("=" * 60)
+        logger.info("Test complete! Run with: uvicorn api:app --reload", extra={"endpoint": "__main__"})
     
     asyncio.run(run_test())
