@@ -24,10 +24,21 @@ from fastapi import FastAPI
 import deps
 from auth import init_db
 from cpmm import CpmmState, calculate_cpmm_purchase, get_cpmm_probability
-from errors import APIError, api_error_handler, http_exception_handler, unhandled_exception_handler
+from errors import (
+    APIError, api_error_handler,
+    http_exception_handler, unhandled_exception_handler,
+)
 from fastapi import HTTPException
 from middleware import configure_middleware
 from models import Outcome
+from routes import (
+    markets_router,
+    trading_router,
+    agents_router,
+    chat_router,
+    admin_router,
+    meta_router,
+)
 from sse import router as sse_router
 from storage import Storage
 
@@ -106,16 +117,6 @@ configure_middleware(app)
 
 # SSE router (issue #68)
 app.include_router(sse_router)
-
-# Route modules (issue #110 — split route handlers)
-from routes import (
-    markets_router,
-    trading_router,
-    agents_router,
-    chat_router,
-    admin_router,
-    meta_router,
-)
 
 app.include_router(markets_router)
 app.include_router(trading_router)
