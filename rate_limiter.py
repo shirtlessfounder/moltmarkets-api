@@ -55,7 +55,8 @@ class RateLimiter:
         Returns:
             (allowed, info)
             - allowed: True if under the limit, False if rate-limited.
-            - info: dict with "remaining", "reset_in", and "detail" (human-readable).
+            - info: dict with "limit", "remaining", "reset_in", "retry_after",
+              and "detail" (human-readable).
         """
         now = time.time()
         cutoff = now - window_seconds
@@ -73,10 +74,14 @@ class RateLimiter:
                 # Find when the oldest entry expires
                 oldest = min(timestamps) if timestamps else now
                 reset_in = round(oldest + window_seconds - now, 1)
+                retry_after = max(1, int(reset_in))
                 return False, {
+                    "limit": max_requests,
                     "remaining": 0,
+                    "reset": int(now + reset_in),
                     "reset_in": max(0, reset_in),
-                    "detail": f"Rate limit exceeded. Try again in {max(1, int(reset_in))}s.",
+                    "retry_after": retry_after,
+                    "detail": f"Rate limit exceeded. Try again in {retry_after}s.",
                 }
 
             # Allow — record this request
@@ -88,8 +93,11 @@ class RateLimiter:
                 self._cleanup(now)
 
             return True, {
+                "limit": max_requests,
                 "remaining": remaining - 1,
+                "reset": int(now + window_seconds),
                 "reset_in": 0,
+                "retry_after": 0,
                 "detail": "",
             }
 

@@ -15,12 +15,41 @@ from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, unquote
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Request
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability, Outcome as CpmmOutcome
 from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE
+
+
+def set_rate_limit_headers(response: Response, info: dict) -> None:
+    """Inject standard rate-limit headers into a FastAPI Response.
+
+    Headers follow the draft IETF RateLimit header spec and the widely-adopted
+    X-RateLimit-* convention so agent HTTP clients can self-throttle.
+    """
+    response.headers["X-RateLimit-Limit"] = str(info.get("limit", ""))
+    response.headers["X-RateLimit-Remaining"] = str(info.get("remaining", ""))
+    response.headers["X-RateLimit-Reset"] = str(info.get("reset", ""))
+
+
+def raise_rate_limited(detail: str, info: dict) -> None:
+    """Raise a 429 HTTPException with Retry-After header guidance.
+
+    The ``info`` dict comes from ``rate_limiter.check()`` and contains the
+    ``retry_after`` value in seconds.
+    """
+    raise HTTPException(
+        status_code=429,
+        detail=detail,
+        headers={
+            "Retry-After": str(info.get("retry_after", 60)),
+            "X-RateLimit-Limit": str(info.get("limit", "")),
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": str(info.get("reset", "")),
+        },
+    )
 import secrets
 import hashlib
 import psycopg2
@@ -1887,11 +1916,17 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
 # =============================================================================
 
 @app.post("/markets/{market_id}/bet", response_model=BetResponse)
-async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(require_auth)):
+async def place_bet(market_id: str, req: BetRequest, response: Response, user: dict = Depends(require_auth)):
     """Place a bet on a market.
     
     Rate limited: max 30 bets per agent per minute.
     Max bet amount: 500ŧ per single bet.
+    
+    Rate limit headers are included in every response:
+    - `X-RateLimit-Limit`: Max requests in window
+    - `X-RateLimit-Remaining`: Remaining requests
+    - `X-RateLimit-Reset`: Unix timestamp when window resets
+    - `Retry-After` (on 429 only): Seconds to wait
     """
     # Require twitter verification before trading
     if user.get("status") != "claimed":
@@ -1914,10 +1949,12 @@ async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(requir
         window_seconds=60,
     )
     if not allowed:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Betting rate limit exceeded ({MAX_BETS_PER_MINUTE}/minute). {info['detail']}",
+        raise_rate_limited(
+            f"Betting rate limit exceeded ({MAX_BETS_PER_MINUTE}/minute). {info['detail']}",
+            info,
         )
+    # Inject rate limit headers on successful responses too
+    set_rate_limit_headers(response, info)
 
     market = db.get_market(market_id)
     if not market:
@@ -2655,7 +2692,7 @@ async def get_agent_reputation(agent_id: str):
 # =============================================================================
 
 @app.post("/agents/register", response_model=AgentRegisteredWithClaim)
-async def register_agent(req: AgentRegister, request: Request):
+async def register_agent(req: AgentRegister, request: Request, response: Response):
     """
     Register a new agent and get an API key.
     
@@ -2674,10 +2711,11 @@ async def register_agent(req: AgentRegister, request: Request):
         window_seconds=3600,
     )
     if not allowed:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Registration rate limit exceeded ({MAX_REGISTRATIONS_PER_HOUR}/hour per IP). {info['detail']}",
+        raise_rate_limited(
+            f"Registration rate limit exceeded ({MAX_REGISTRATIONS_PER_HOUR}/hour per IP). {info['detail']}",
+            info,
         )
+    set_rate_limit_headers(response, info)
 
     # Normalize username to lowercase (case-insensitive uniqueness)
     username = req.username.lower()
@@ -2909,7 +2947,7 @@ async def claim_agent(req: ClaimRequest):
 # =============================================================================
 
 @app.post("/humans/register", response_model=HumanRegistered)
-async def register_human(req: HumanRegister, request: Request):
+async def register_human(req: HumanRegister, request: Request, response: Response):
     """
     Register a human user for chat.
     
@@ -2927,10 +2965,11 @@ async def register_human(req: HumanRegister, request: Request):
         window_seconds=3600,
     )
     if not allowed:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Registration rate limit exceeded ({MAX_REGISTRATIONS_PER_HOUR}/hour per IP). {info['detail']}",
+        raise_rate_limited(
+            f"Registration rate limit exceeded ({MAX_REGISTRATIONS_PER_HOUR}/hour per IP). {info['detail']}",
+            info,
         )
+    set_rate_limit_headers(response, info)
 
     # Normalize username to lowercase
     username = req.username.lower()
@@ -2998,7 +3037,7 @@ async def get_leaderboard():
 # =============================================================================
 
 @app.post("/chat", response_model=ChatMessage)
-async def send_chat_message(req: ChatMessageCreate, channel: str = "agents", user: dict = Depends(require_auth)):
+async def send_chat_message(req: ChatMessageCreate, response: Response, channel: str = "agents", user: dict = Depends(require_auth)):
     """
     Send a chat message.
     
@@ -3027,10 +3066,11 @@ async def send_chat_message(req: ChatMessageCreate, channel: str = "agents", use
         window_seconds=60,
     )
     if not allowed:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Chat rate limit exceeded ({MAX_CHAT_MESSAGES_PER_MINUTE}/minute). {info['detail']}",
+        raise_rate_limited(
+            f"Chat rate limit exceeded ({MAX_CHAT_MESSAGES_PER_MINUTE}/minute). {info['detail']}",
+            info,
         )
+    set_rate_limit_headers(response, info)
     
     message = db.create_chat_message(
         user_id=user["id"],
