@@ -19,6 +19,8 @@ from fastapi import FastAPI, HTTPException, Depends, Header, Request, Response
 from errors import error_response, APIError, ErrorCode, api_error_handler, http_exception_handler, unhandled_exception_handler
 import httpx
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability
+from event_bus import event_bus, SSEEvent
+from sse import router as sse_router
 from models import (
     MarketCreate, MarketResolve, MarketSummary, MarketDetail, MarketCreated,
     BetRequest, BetResponse, FeeBreakdown, SellRequest, SellResponse, Position, MarketPositions,
@@ -289,6 +291,9 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 # CORS + Idempotency middleware (see middleware.py for configuration)
 configure_middleware(app)
 
+# Mount SSE router (issue #68)
+app.include_router(sse_router)
+
 
 # =============================================================================
 # Payout Helper
@@ -553,6 +558,19 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
     elif duration_days > 14:
         warning = "Heads up: markets over 2 weeks often see lower engagement. Consider shorter timeframes for more action."
     
+    # Publish SSE event (issue #68)
+    await event_bus.publish(SSEEvent(
+        event="market_created",
+        data={
+            "market_id": market["id"],
+            "title": market["title"],
+            "creator_username": user["username"],
+            "probability": get_cpmm_probability(market["pool"], market["p"]),
+            "closes_at": str(market["closes_at"]),
+        },
+        market_id=market["id"],
+    ))
+
     return MarketCreated(
         id=market["id"],
         title=market["title"],
@@ -606,6 +624,18 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
     creator = db.get_user(market["creator_id"]) if market["creator_id"] else None
     creator_username = creator["username"] if creator else None
     
+    # Publish SSE event (issue #68)
+    await event_bus.publish(SSEEvent(
+        event="market_resolved",
+        data={
+            "market_id": market["id"],
+            "title": market["title"],
+            "outcome": req.outcome.value,
+            "resolved_at": str(market["resolved_at"]),
+        },
+        market_id=market["id"],
+    ))
+
     return MarketDetail(
         id=market["id"],
         title=market["title"],
@@ -739,6 +769,33 @@ async def place_bet(market_id: str, req: BetRequest, response: Response, user: d
     updated_user = db.get_user(user["id"])
     new_balance = updated_user["balance"] if updated_user else user["balance"] - total_cost
     
+    # Publish SSE events (issue #68)
+    await event_bus.publish(SSEEvent(
+        event="bet_placed",
+        data={
+            "bet_id": bet["id"],
+            "market_id": market_id,
+            "user_id": user["id"],
+            "username": user["username"],
+            "outcome": req.outcome.value,
+            "amount": req.amount,
+            "shares": shares,
+            "probability_before": prob_before,
+            "probability_after": prob_after,
+        },
+        market_id=market_id,
+    ))
+    await event_bus.publish(SSEEvent(
+        event="market_update",
+        data={
+            "market_id": market_id,
+            "probability": prob_after,
+            "total_volume": market["total_volume"] + req.amount,
+            "pool": result["new_pool"],
+        },
+        market_id=market_id,
+    ))
+
     return BetResponse(
         bet_id=bet["id"],
         market_id=bet["market_id"],
@@ -847,7 +904,18 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
     
     # Invalidate market list cache — probability changed
     market_cache.invalidate()
-    
+
+    # Publish SSE event (issue #68)
+    await event_bus.publish(SSEEvent(
+        event="market_update",
+        data={
+            "market_id": market_id,
+            "probability": prob_after,
+            "pool": result["new_pool"],
+        },
+        market_id=market_id,
+    ))
+
     return SellResponse(
         market_id=market_id,
         user_id=user["id"],
@@ -1043,6 +1111,20 @@ async def create_comment(market_id: str, req: CommentCreate, user: dict = Depend
         parent_id=req.parent_id,
     )
     
+    # Publish SSE event for new comment (issue #68) — reuses chat_message type
+    await event_bus.publish(SSEEvent(
+        event="chat_message",
+        data={
+            "id": comment["id"],
+            "username": user["username"],
+            "text": comment["content"],
+            "channel": "comment",
+            "market_id": market_id,
+            "created_at": str(comment["created_at"]),
+        },
+        market_id=market_id,
+    ))
+
     return Comment(
         id=comment["id"],
         market_id=comment["market_id"],
@@ -1123,6 +1205,19 @@ async def request_resolution(market_id: str, user: dict = Depends(require_auth))
         _calculate_and_distribute_payouts(market_id, outcome_enum)
         
         resolved_at = datetime.now(timezone.utc)
+
+        # Publish SSE event (issue #68)
+        await event_bus.publish(SSEEvent(
+            event="market_resolved",
+            data={
+                "market_id": market_id,
+                "title": market["title"],
+                "outcome": outcome,
+                "resolved_at": str(resolved_at),
+                "resolution_method": "committee",
+            },
+            market_id=market_id,
+        ))
     
     # Build response
     return ResolutionResult(
@@ -1847,6 +1942,18 @@ async def send_chat_message(req: ChatMessageCreate, response: Response, channel:
         channel=channel,
     )
     
+    # Publish SSE event (issue #68)
+    await event_bus.publish(SSEEvent(
+        event="chat_message",
+        data={
+            "id": str(message["id"]),
+            "username": message["username"],
+            "text": message["text"],
+            "channel": message.get("channel", "agents"),
+            "created_at": str(message["created_at"]),
+        },
+    ))
+
     return ChatMessage(
         id=message["id"],
         username=message["username"],
