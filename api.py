@@ -235,17 +235,42 @@ class Storage:
             self._bets: Dict[str, dict] = {}
             self._positions: Dict[str, Dict[str, dict]] = {}
     
+    def close_pool(self):
+        """Close all connections in the pool.
+        
+        Called during application shutdown to release database connections
+        cleanly instead of leaving them to be garbage-collected.
+        """
+        if self._pool is not None:
+            try:
+                self._pool.closeall()
+                print("Connection pool closed")
+            except Exception as e:
+                print(f"Warning: error closing connection pool: {e}")
+
     def _init_pool(self):
-        """Initialize the connection pool.
+        """Initialize a thread-safe connection pool.
+        
+        Uses ThreadedConnectionPool instead of SimpleConnectionPool because
+        FastAPI handles concurrent requests across multiple threads — 
+        SimpleConnectionPool is NOT thread-safe and can hand the same
+        connection to two threads simultaneously, causing data corruption
+        and 'connection already in use' errors under load.
+        
+        Pool size is configurable via environment variables:
+          DB_POOL_MIN  – minimum connections kept open (default: 2)
+          DB_POOL_MAX  – maximum connections allowed   (default: 10)
         
         Configures TCP keepalives so Railway's Postgres proxy doesn't silently
         drop idle connections, and sets a statement timeout as a safety net
         against queries that hang forever.
         """
         parsed = urlparse(self.database_url)
-        self._pool = pool.SimpleConnectionPool(
-            minconn=1,
-            maxconn=10,
+        min_conn = int(os.getenv("DB_POOL_MIN", "2"))
+        max_conn = int(os.getenv("DB_POOL_MAX", "10"))
+        self._pool = pool.ThreadedConnectionPool(
+            minconn=min_conn,
+            maxconn=max_conn,
             host=parsed.hostname,
             port=parsed.port or 5432,
             user=parsed.username,
@@ -259,7 +284,7 @@ class Storage:
             keepalives_count=3,          # Give up after 3 missed keepalives
             options='-c statement_timeout=30000',  # 30s query timeout
         )
-        print("Connection pool initialized (min=1, max=10, keepalives=on, statement_timeout=30s)")
+        print(f"ThreadedConnectionPool initialized (min={min_conn}, max={max_conn}, keepalives=on, statement_timeout=30s)")
     
     def _get_conn(self):
         """Get a database connection from the pool.
@@ -1646,7 +1671,8 @@ async def lifespan(app: FastAPI):
     user_count = len(db.users)
     print(f"MoltMarkets API started with {market_count} markets, {user_count} users")
     yield
-    # Shutdown
+    # Shutdown: close the connection pool cleanly
+    db.close_pool()
     print("MoltMarkets API shutting down")
 
 
