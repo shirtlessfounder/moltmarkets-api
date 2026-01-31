@@ -44,6 +44,7 @@ from models import (
     CreationScoreResponse, ParticipationScoreResponse,
     PortfolioPosition, PortfolioSummary, PortfolioResponse, UserBetHistoryItem,
 )
+from market_cache import market_cache
 from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE
 from reputation import compute_reputation
 from resolver import resolve_market as resolver_resolve_market
@@ -500,6 +501,12 @@ class Storage:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_closes_at ON markets(closes_at)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users(LOWER(username))")
+                
+                # Composite index for the /markets list query (status + created_at DESC)
+                # Covers the common ORDER BY created_at DESC with optional WHERE status filter
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_status_created ON markets(status, created_at DESC)")
+                # Index on created_at alone for the default ORDER BY
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_created_at ON markets(created_at DESC)")
                 
                 conn.commit()
                 print("Database tables initialized")
@@ -1809,7 +1816,11 @@ def _calculate_and_distribute_payouts(market_id: str, outcome: Outcome) -> int:
 # =============================================================================
 
 @app.get("/markets", response_model=List[MarketSummary], tags=["markets"])
-async def list_markets(status: Optional[str] = None):
+async def list_markets(
+    request: Request,
+    response: Response,
+    status: Optional[str] = None,
+):
     """List markets, filtered by status.
 
     Query params:
@@ -1818,19 +1829,55 @@ async def list_markets(status: Optional[str] = None):
             - "resolving"       → markets past closes_at, awaiting resolution
             - "closed" or "resolved" → resolved markets
             - "all"             → all markets regardless of status
+
+    Caching:
+        Responses include ETag and Last-Modified headers for HTTP caching.
+        Send `If-None-Match` or `If-Modified-Since` to receive 304 Not Modified
+        when data hasn't changed, saving bandwidth and parse time.
+        Server-side results are cached in-memory with a 5-second TTL and
+        invalidated immediately on any market mutation (create, bet, sell, resolve).
     """
+    status_filter = (status or "active").strip().upper()
+
+    # ── HTTP conditional request: If-None-Match ──
+    # Check before doing any work — if the client already has the current version,
+    # return 304 immediately (no DB query, no serialization).
+    client_etag = request.headers.get("if-none-match")
+    cached = market_cache.get(status_filter)
+    if cached and client_etag and client_etag == cached["etag"]:
+        return Response(
+            status_code=304,
+            headers={
+                "ETag": cached["etag"],
+                "Last-Modified": market_cache.last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+                "Cache-Control": "public, max-age=5",
+            },
+        )
+
+    # ── In-memory cache hit ──
+    if cached:
+        _set_cache_headers(response, cached["etag"], market_cache.last_modified)
+        return cached["data"]
+
+    # ── Cache miss: build response from DB ──
     # Single JOIN query: markets + creator usernames (was N+1: 1 + N get_user calls)
     markets = db.list_markets_with_creators()
 
     # Auto-transition: move OPEN markets past closes_at to RESOLVING
     now = datetime.now(timezone.utc)
+    transitioned = False
     for m in markets:
         if m["status"] == MarketStatus.OPEN and m["closes_at"] <= now:
             db.update_market_status(m["id"], MarketStatus.RESOLVING)
             m["status"] = MarketStatus.RESOLVING
+            transitioned = True
+
+    # If we transitioned any markets, invalidate cache so other status filters
+    # pick up the change too.
+    if transitioned:
+        market_cache.invalidate()
 
     # Apply status filter (default: only open/active markets)
-    status_filter = (status or "active").strip().upper()
     if status_filter == "ALL":
         pass  # no filtering
     elif status_filter in ("CLOSED", "RESOLVED"):
@@ -1840,6 +1887,8 @@ async def list_markets(status: Optional[str] = None):
     else:
         # Default: only open markets (ACTIVE or OPEN both map here)
         markets = [m for m in markets if m["status"] == MarketStatus.OPEN]
+
+    # Build response — precompute probability once per market
     result = []
     for m in markets:
         result.append(MarketSummary(
@@ -1852,7 +1901,18 @@ async def list_markets(status: Optional[str] = None):
             creator_id=m["creator_id"],
             creator_username=m.get("creator_username"),
         ))
+
+    # Store in cache
+    entry = market_cache.set(status_filter, result)
+    _set_cache_headers(response, entry["etag"], market_cache.last_modified)
     return result
+
+
+def _set_cache_headers(response: Response, etag: str, last_modified: datetime) -> None:
+    """Set ETag, Last-Modified, and Cache-Control headers on a response."""
+    response.headers["ETag"] = etag
+    response.headers["Last-Modified"] = last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    response.headers["Cache-Control"] = "public, max-age=5"
 
 
 @app.get("/markets/{market_id}", response_model=MarketDetail, tags=["markets"])
@@ -1953,6 +2013,9 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
     # Update last market creation timestamp
     db.update_user_last_market_created(user["id"])
     
+    # Invalidate market list cache — new market should appear immediately
+    market_cache.invalidate()
+    
     # Calculate market duration for guidance
     now = datetime.now(timezone.utc)
     duration_days = (req.closes_at - now).total_seconds() / 86400
@@ -2009,6 +2072,9 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
     
     db.resolve_market(market_id, req.outcome)
     _calculate_and_distribute_payouts(market_id, req.outcome)
+    
+    # Invalidate market list cache — status changed to RESOLVED
+    market_cache.invalidate()
     
     market = db.get_market(market_id)
     
@@ -2131,6 +2197,9 @@ async def place_bet(market_id: str, req: BetRequest, response: Response, user: d
     db.update_market_pool(market_id, result["new_pool"], result["new_p"], req.amount)
     db.update_position(market_id, user["id"], req.outcome, shares, req.amount)
     
+    # Invalidate market list cache — probability and volume changed
+    market_cache.invalidate()
+    
     bet_id = str(uuid.uuid4())
     bet = db.create_bet(
         bet_id=bet_id,
@@ -2252,6 +2321,9 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
     
     # Update user's position (reduce shares)
     db.reduce_position(market_id, user["id"], req.outcome, req.shares)
+    
+    # Invalidate market list cache — probability changed
+    market_cache.invalidate()
     
     return SellResponse(
         market_id=market_id,
