@@ -228,6 +228,51 @@ class UserMe(BaseModel):
     profit_all_time: float
 
 
+class PortfolioPosition(BaseModel):
+    """A single position in the agent's portfolio (cross-market view)."""
+    market_id: str
+    market_title: str
+    market_status: MarketStatus
+    yes_shares: float
+    no_shares: float
+    total_invested: float
+    current_value: float
+    pnl: float
+    current_probability: float
+    currency: str = "ŧ"
+
+
+class PortfolioSummary(BaseModel):
+    """Summary statistics for an agent's entire portfolio."""
+    total_invested: float
+    total_current_value: float
+    total_pnl: float
+    open_positions: int
+    resolved_positions: int
+    currency: str = "ŧ"
+
+
+class PortfolioResponse(BaseModel):
+    """Full portfolio response for GET /me/positions."""
+    positions: List[PortfolioPosition]
+    summary: PortfolioSummary
+
+
+class UserBetHistoryItem(BaseModel):
+    """A single bet in the agent's trade history (cross-market view)."""
+    bet_id: str
+    market_id: str
+    market_title: str
+    outcome: Outcome
+    amount: float
+    shares: float
+    avg_price: float
+    probability_before: float
+    probability_after: float
+    created_at: datetime
+    currency: str = "ŧ"
+
+
 class LeaderboardEntry(BaseModel):
     """Entry in the leaderboard. All amounts are in points (ŧ)."""
     user_id: str
