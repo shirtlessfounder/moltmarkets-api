@@ -20,6 +20,7 @@ from errors import error_response, APIError, ErrorCode, api_error_handler, http_
 import httpx
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability
 from event_bus import event_bus, SSEEvent
+from sse import router as sse_router
 from models import (
     MarketCreate, MarketResolve, MarketSummary, MarketDetail, MarketCreated,
     BetRequest, BetResponse, FeeBreakdown, SellRequest, SellResponse, Position, MarketPositions,
@@ -291,7 +292,6 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 configure_middleware(app)
 
 # Mount SSE router (issue #68)
-from sse import router as sse_router
 app.include_router(sse_router)
 
 
