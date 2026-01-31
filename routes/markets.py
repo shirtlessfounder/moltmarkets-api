@@ -8,13 +8,13 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 
 from auth import require_auth
 from cpmm import get_cpmm_probability
 from deps import (
-    get_db, validate_uuid, clamp_pagination, maybe_transition_market,
-    bg_transition_expired_markets, calculate_and_distribute_payouts,
+    get_db, validate_uuid, clamp_pagination,
+    calculate_and_distribute_payouts,
     set_cache_headers, form_committee, check_committee_unanimity,
     MARKET_CREATION_COST, COMMITTEE_WINDOW_MINUTES,
     CABAL_USERNAMES, CABAL_COOLDOWN_MINUTES, DEFAULT_COOLDOWN_MINUTES,
@@ -51,7 +51,6 @@ async def list_markets(
     status: Optional[str] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
-    bg: BackgroundTasks = BackgroundTasks(),
 ):
     """List markets, filtered by status, with pagination."""
     db = get_db()
@@ -75,17 +74,9 @@ async def list_markets(
         return cached["data"]
 
     markets = db.list_markets_with_creators()
-    bg.add_task(bg_transition_expired_markets)
 
-    now = datetime.now(timezone.utc)
-    transitioned = False
-    for m in markets:
-        if m["status"] == MarketStatus.OPEN and m["closes_at"] <= now:
-            m["status"] = MarketStatus.RESOLVING
-            transitioned = True
-
-    if transitioned:
-        market_cache.invalidate()
+    # Markets no longer auto-transition based on closes_at (issue #115).
+    # They remain OPEN until explicitly resolved.
 
     if status_filter == "ALL":
         pass
@@ -167,8 +158,6 @@ async def get_market(market_id: str):
     market = db.get_market(market_id)
     if not market:
         return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
-
-    maybe_transition_market(market, market_id)
 
     creator = db.get_user(market["creator_id"]) if market["creator_id"] else None
     creator_username = creator["username"] if creator else None
@@ -283,11 +272,12 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
 async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depends(require_auth)):
     """Resolve a market. Only creator can resolve.
 
-    Committee window enforcement (issue #107):
-    - If a committee exists with >1 member and the deadline hasn't passed,
-      the creator must use the committee vote endpoint instead.
-    - After the 30-minute deadline, creator regains unilateral resolve.
-    - Solo creator (no other traders) can resolve immediately.
+    Issue #115: Markets remain OPEN and tradeable until resolution.
+    - Creator calls resolve on an OPEN market → initiates resolution.
+    - If solo creator (no other traders): resolves immediately.
+    - If other traders exist: forms committee, transitions to RESOLVING,
+      and requires committee vote process (30-minute window).
+    - After the committee deadline, creator regains unilateral resolve.
     """
     db = get_db()
     validate_uuid(market_id, "market_id")
@@ -301,9 +291,27 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
     if market["status"] == MarketStatus.RESOLVED:
         return error_response(400, "Market already resolved", ErrorCode.ALREADY_RESOLVED)
 
-    maybe_transition_market(market, market_id)
+    # If market is OPEN, initiate the resolution process (issue #115)
+    if market["status"] == MarketStatus.OPEN:
+        committee = form_committee(market_id, market)
+        db.update_market_status(market_id, MarketStatus.RESOLVING)
+        market["status"] = MarketStatus.RESOLVING
 
-    # Committee window enforcement
+        # If committee has multiple members, require the committee vote process
+        if len(committee) > 1:
+            resolution_deadline = market.get("resolution_deadline")
+            now = datetime.now(timezone.utc)
+            if resolution_deadline and now < resolution_deadline:
+                remaining = (resolution_deadline - now).total_seconds() / 60
+                return error_response(403,
+                    f"Committee resolution window is active. Use POST /markets/{market_id}/resolution-vote instead. "
+                    f"Creator can resolve unilaterally in {remaining:.0f} minutes.",
+                    ErrorCode.COMMITTEE_WINDOW_ACTIVE,
+                    detail={"resolution_deadline": resolution_deadline.isoformat(),
+                            "remaining_minutes": round(remaining, 1)})
+        # Solo creator → falls through to resolve immediately
+
+    # Market is RESOLVING — check committee window enforcement (issue #107)
     committee = market.get("committee") or []
     resolution_deadline = market.get("resolution_deadline")
     if len(committee) > 1 and resolution_deadline:
@@ -358,13 +366,13 @@ async def cast_committee_vote(market_id: str, req: CommitteeVoteRequest, user: d
     if not market:
         return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
 
-    maybe_transition_market(market, market_id)
-
     if market["status"] == MarketStatus.RESOLVED:
         return error_response(400, "Market already resolved", ErrorCode.ALREADY_RESOLVED)
 
     if market["status"] != MarketStatus.RESOLVING:
-        return error_response(400, "Market is not in RESOLVING state", ErrorCode.MARKET_CLOSED)
+        return error_response(400,
+            "Market is not in RESOLVING state. The creator must first call POST /markets/{id}/resolve to initiate resolution.",
+            ErrorCode.MARKET_CLOSED)
 
     # Form committee if not yet formed (e.g., market was set to RESOLVING externally)
     committee = market.get("committee")
@@ -431,8 +439,6 @@ async def get_committee_status(market_id: str):
     market = db.get_market(market_id)
     if not market:
         return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
-
-    maybe_transition_market(market, market_id)
 
     committee = market.get("committee") or []
     resolution_deadline = market.get("resolution_deadline")
@@ -628,8 +634,6 @@ async def request_resolution(market_id: str, user: dict = Depends(require_auth))
 
     if market["status"] == MarketStatus.RESOLVED:
         return error_response(400, "Market already resolved", ErrorCode.ALREADY_RESOLVED)
-
-    maybe_transition_market(market, market_id)
 
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     brave_key = os.getenv("BRAVE_API_KEY")

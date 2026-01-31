@@ -101,12 +101,12 @@ def _place_bet(client: TestClient, market_id: str, headers: dict,
 
 
 def _force_resolving(market_id: str):
-    """Force a market into RESOLVING state (bypass time check)."""
-    market = db.get_market(market_id)
-    market["status"] = MarketStatus.RESOLVING
-    market["closes_at"] = datetime.now(timezone.utc) - timedelta(minutes=1)
-    if hasattr(db, '_use_memory') and db._use_memory:
-        db._markets[market_id] = market
+    """Force a market into RESOLVING state for testing.
+
+    Issue #115: markets no longer auto-transition based on closes_at.
+    This helper directly sets RESOLVING status for tests that need it.
+    """
+    db.update_market_status(market_id, MarketStatus.RESOLVING)
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +238,14 @@ class TestCommitteeFormation:
         assert trader1["user_id"] in committee
         assert len(committee) == 2
 
-    def test_committee_formed_on_transition(self):
-        """Committee is auto-formed when market transitions via maybe_transition_market."""
-        from deps import maybe_transition_market
+    def test_committee_formed_on_resolve_attempt(self):
+        """Committee is formed when creator attempts to resolve an OPEN market with traders (issue #115).
 
+        Since markets no longer auto-transition at closes_at, the committee
+        is formed when the creator first calls POST /resolve on an OPEN market.
+        If other traders exist, the endpoint forms a committee, transitions to
+        RESOLVING, and returns 403 to start the committee vote window.
+        """
         creator = _register_agent(client, "creator_auto")
         trader = _register_agent(client, "trader_auto")
         market = _create_market(client, creator["headers"])
@@ -249,12 +253,13 @@ class TestCommitteeFormation:
 
         _place_bet(client, market_id, trader["headers"], "YES", 50)
 
-        # Force the market past closes_at
+        # Creator tries to resolve OPEN market with traders → committee formed, 403
+        resp = client.post(f"/markets/{market_id}/resolve",
+            json={"outcome": "YES"}, headers=creator["headers"])
+        assert resp.status_code == 403
+        assert "COMMITTEE_WINDOW_ACTIVE" in resp.text
+
         m = db.get_market(market_id)
-        m["closes_at"] = datetime.now(timezone.utc) - timedelta(minutes=1)
-
-        maybe_transition_market(m, market_id)
-
         assert m["status"] == MarketStatus.RESOLVING
         assert m.get("committee") is not None
         assert creator["user_id"] in m["committee"]

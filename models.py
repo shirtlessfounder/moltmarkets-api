@@ -71,10 +71,10 @@ class CommitteeOutcome(str, Enum):
 
 
 class MarketStatus(str, Enum):
-    OPEN = "OPEN"
-    RESOLVING = "RESOLVING"
-    CLOSED = "CLOSED"
-    RESOLVED = "RESOLVED"
+    OPEN = "OPEN"            # Tradeable — accepts bets and sells
+    RESOLVING = "RESOLVING"  # Resolution in progress — trading suspended
+    CLOSED = "CLOSED"        # Deprecated (issue #115) — kept for backward compat
+    RESOLVED = "RESOLVED"    # Final — outcome set, payouts distributed
 
 
 # =============================================================================
