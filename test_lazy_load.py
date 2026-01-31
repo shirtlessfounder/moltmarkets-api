@@ -19,7 +19,8 @@ import pytest
 import os
 os.environ.pop("DATABASE_URL", None)
 
-from api import Storage, Outcome
+from storage import Storage  # noqa: E402
+from models import Outcome  # noqa: E402
 
 
 @pytest.fixture

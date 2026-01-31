@@ -19,10 +19,8 @@ import pytest
 import os
 os.environ.pop("DATABASE_URL", None)
 
-from api import (
-    Storage,
-    STARTING_BALANCE,
-)
+from storage import Storage  # noqa: E402
+from deps import STARTING_BALANCE  # noqa: E402
 from models import MarketStatus, Outcome
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale
 
