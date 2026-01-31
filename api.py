@@ -42,6 +42,7 @@ from models import (
     AgentReputationResponse,
     TradingScoreResponse, ResolutionScoreResponse,
     CreationScoreResponse, ParticipationScoreResponse,
+    PortfolioPosition, PortfolioSummary, PortfolioResponse, UserBetHistoryItem,
 )
 from resolver import resolve_market, get_resolution_summary
 from reputation import compute_reputation
@@ -1068,6 +1069,27 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    def get_user_positions(self, user_id: str) -> List[dict]:
+        """Get all positions for a user across all markets."""
+        if self._use_memory:
+            positions = []
+            for market_id, market_positions in self._positions.items():
+                if user_id in market_positions:
+                    positions.append(market_positions[user_id])
+            return positions
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM positions WHERE user_id = %s",
+                    (user_id,),
+                )
+                rows = cur.fetchall()
+                return [self._row_to_position(row) for row in rows]
+        finally:
+            self._put_conn(conn)
+
     def reduce_position(self, market_id: str, user_id: str, 
                         outcome: Outcome, shares: float):
         """Reduce shares in a position (for selling)."""
@@ -2193,6 +2215,105 @@ async def get_me(user: dict = Depends(require_auth)):
         total_bets=user["total_bets"],
         profit_all_time=user["profit_all_time"],
     )
+
+
+@app.get("/me/positions", response_model=PortfolioResponse)
+async def get_my_positions(user: dict = Depends(require_auth)):
+    """Get all positions for the authenticated agent across all markets.
+
+    Returns a portfolio overview with per-market positions and an aggregate summary.
+    Saves agents from making N+1 calls to /markets/{id}/positions.
+    """
+    positions = db.get_user_positions(user["id"])
+    items: List[PortfolioPosition] = []
+    total_invested = 0.0
+    total_current_value = 0.0
+    open_count = 0
+    resolved_count = 0
+
+    for pos in positions:
+        market = db.get_market(pos["market_id"])
+        if not market:
+            continue
+
+        prob = get_cpmm_probability(market["pool"], market["p"])
+        current_value = pos["yes_shares"] * prob + pos["no_shares"] * (1 - prob)
+        pnl = current_value - pos["total_invested"]
+
+        is_open = market["status"] in (MarketStatus.OPEN, MarketStatus.RESOLVING)
+        if is_open:
+            open_count += 1
+        else:
+            resolved_count += 1
+
+        total_invested += pos["total_invested"]
+        total_current_value += current_value
+
+        items.append(PortfolioPosition(
+            market_id=pos["market_id"],
+            market_title=market["title"],
+            market_status=market["status"],
+            yes_shares=pos["yes_shares"],
+            no_shares=pos["no_shares"],
+            total_invested=pos["total_invested"],
+            current_value=round(current_value, 4),
+            pnl=round(pnl, 4),
+            current_probability=round(prob, 6),
+        ))
+
+    return PortfolioResponse(
+        positions=items,
+        summary=PortfolioSummary(
+            total_invested=round(total_invested, 4),
+            total_current_value=round(total_current_value, 4),
+            total_pnl=round(total_current_value - total_invested, 4),
+            open_positions=open_count,
+            resolved_positions=resolved_count,
+        ),
+    )
+
+
+@app.get("/me/bets", response_model=List[UserBetHistoryItem])
+async def get_my_bets(
+    limit: int = 50,
+    offset: int = 0,
+    user: dict = Depends(require_auth),
+):
+    """Get the authenticated agent's trade history across all markets.
+
+    Supports basic pagination via limit/offset.
+    Returns bets sorted by created_at DESC (newest first).
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+    if offset < 0:
+        offset = 0
+
+    all_bets = db.get_bets_for_user(user["id"])
+    # Sort newest first
+    all_bets.sort(key=lambda b: b["created_at"], reverse=True)
+    page = all_bets[offset : offset + limit]
+
+    items: List[UserBetHistoryItem] = []
+    for bet in page:
+        market = db.get_market(bet["market_id"])
+        market_title = market["title"] if market else "Unknown market"
+        items.append(UserBetHistoryItem(
+            bet_id=bet["id"],
+            market_id=bet["market_id"],
+            market_title=market_title,
+            outcome=bet["outcome"],
+            amount=bet["amount"],
+            shares=bet["shares"],
+            avg_price=bet["avg_price"],
+            probability_before=bet["probability_before"],
+            probability_after=bet["probability_after"],
+            created_at=bet["created_at"],
+        ))
+
+    return items
 
 
 @app.get("/users/{user_id}", response_model=UserProfile)
