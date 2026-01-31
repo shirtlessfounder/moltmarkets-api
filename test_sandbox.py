@@ -27,8 +27,8 @@ from fastapi.testclient import TestClient
 # Ensure in-memory storage (no DATABASE_URL) before importing app
 os.environ.pop("DATABASE_URL", None)
 
-from api import app, db  # noqa: E402
-from deps import STARTING_BALANCE  # noqa: E402
+from api import app  # noqa: E402
+from deps import get_db, STARTING_BALANCE  # noqa: E402
 from rate_limiter import rate_limiter  # noqa: E402
 from sandbox import SANDBOX_STARTING_BALANCE, SANDBOX_BALANCE_RESET_AMOUNT  # noqa: E402
 
@@ -39,6 +39,7 @@ from sandbox import SANDBOX_STARTING_BALANCE, SANDBOX_BALANCE_RESET_AMOUNT  # no
 
 def _fresh_storage():
     """Reset the global in-memory storage between tests."""
+    db = get_db()
     db._markets.clear()
     db._users.clear()
     db._bets.clear()
@@ -68,7 +69,7 @@ def _register_agent(client: TestClient, username: str = None,
     api_key = data["api_key"]
     # Force-claim non-sandbox agents
     if not sandbox:
-        db.update_user_status(data["user_id"], "claimed")
+        get_db().update_user_status(data["user_id"], "claimed")
     return {
         "data": data,
         "api_key": api_key,
@@ -297,8 +298,8 @@ class TestDryRunBet:
         market_id = market["id"]
 
         # Set balance to near zero
-        user = db.get_user(agent["user_id"])
-        db.update_user_balance(agent["user_id"], -(user["balance"] - 1.0))
+        user = get_db().get_user(agent["user_id"])
+        get_db().update_user_balance(agent["user_id"], -(user["balance"] - 1.0))
 
         resp = client.post(f"/markets/{market_id}/bet", json={
             "outcome": "YES",
