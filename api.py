@@ -33,6 +33,8 @@ from middleware import configure_middleware
 from models import Outcome
 from routes import (
     markets_router,
+    resolution_router,
+    comments_router,
     trading_router,
     agents_router,
     chat_router,
@@ -119,6 +121,8 @@ configure_middleware(app)
 app.include_router(sse_router)
 
 app.include_router(markets_router)
+app.include_router(resolution_router)
+app.include_router(comments_router)
 app.include_router(trading_router)
 app.include_router(agents_router)
 app.include_router(chat_router)
