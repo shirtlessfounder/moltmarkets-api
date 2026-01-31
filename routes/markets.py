@@ -27,6 +27,7 @@ from models import (
     CommitteeVoteDetail, CommitteeOutcome,
     MarketStatus, ResolutionStage,
     PaginationMeta, PaginatedMarketSummary,
+    BetHistoryItem, Comment,
 )
 
 logger = logging.getLogger(__name__)
@@ -180,13 +181,21 @@ async def list_markets(
     return paginated
 
 
-def _build_market_detail(market: dict, creator_username: str = None) -> MarketDetail:
-    """Build a MarketDetail response from a market dict, including committee fields."""
+def _build_market_detail(market: dict, creator_username: str = None, include: str = None) -> MarketDetail:
+    """Build a MarketDetail response from a market dict, including committee fields.
+    
+    Args:
+        market: Market dict from database
+        creator_username: Optional creator username
+        include: Comma-separated list of extra data to include (history, bets, comments)
+    """
     db = get_db()
+    market_id = market["id"]
+    
     # Build committee vote details if committee exists
     committee_votes_detail = None
     if market.get("committee"):
-        raw_votes = db.get_committee_votes(market["id"])
+        raw_votes = db.get_committee_votes(market_id)
         if raw_votes:
             committee_votes_detail = [
                 CommitteeVoteDetail(
@@ -198,9 +207,70 @@ def _build_market_detail(market: dict, creator_username: str = None) -> MarketDe
             ]
 
     resolution_stage, committee_size, votes_cast = _compute_resolution_stage(market)
+    
+    # Parse include param
+    include_set = set(include.lower().split(",")) if include else set()
+    
+    # Fetch optional bundled data
+    history_points = None
+    bets_list = None
+    comments_list = None
+    
+    if "history" in include_set:
+        # Build price history (same logic as /history endpoint)
+        market_bets = sorted(
+            db.get_bets_for_market(market_id),
+            key=lambda x: x["created_at"],
+        )
+        history_points = [ProbabilityPoint(
+            timestamp=market["created_at"],
+            probability=0.5,
+            volume=0.0,
+        )]
+        cumulative_volume = 0.0
+        for bet in market_bets:
+            cumulative_volume += bet["amount"]
+            history_points.append(ProbabilityPoint(
+                timestamp=bet["created_at"],
+                probability=bet["probability_after"],
+                volume=cumulative_volume,
+            ))
+    
+    if "bets" in include_set:
+        # Build trade history (same logic as /bets endpoint)
+        raw_bets = db.get_bets_for_market(market_id)
+        bets_list = []
+        for bet in sorted(raw_bets, key=lambda x: x["created_at"], reverse=True):
+            user = db.get_user(bet["user_id"])
+            bets_list.append(BetHistoryItem(
+                bet_id=bet["id"],
+                user_id=bet["user_id"],
+                username=user["username"] if user else "unknown",
+                outcome=bet["outcome"],
+                amount=bet["amount"],
+                shares=bet["shares"],
+                probability_after=bet["probability_after"],
+                created_at=bet["created_at"],
+            ))
+    
+    if "comments" in include_set:
+        # Build comments (same logic as /comments endpoint)
+        raw_comments = db.get_comments_for_market(market_id)
+        comments_list = [
+            Comment(
+                id=c["id"],
+                market_id=c["market_id"],
+                user_id=c["user_id"],
+                username=c.get("username", "unknown"),
+                content=c["content"],
+                created_at=c["created_at"],
+                parent_id=c.get("parent_id"),
+            )
+            for c in raw_comments
+        ]
 
     return MarketDetail(
-        id=market["id"],
+        id=market_id,
         title=market["title"],
         description=market["description"],
         probability=get_cpmm_probability(market["pool"], market["p"]),
@@ -220,12 +290,21 @@ def _build_market_detail(market: dict, creator_username: str = None) -> MarketDe
         resolution_stage=resolution_stage,
         committee_size=committee_size,
         votes_cast=votes_cast,
+        history=history_points,
+        bets=bets_list,
+        comments=comments_list,
     )
 
 
 @router.get("/markets/{market_id}", response_model=MarketDetail)
-async def get_market(market_id: str):
-    """Get market details including current probability."""
+async def get_market(market_id: str, include: Optional[str] = None):
+    """Get market details including current probability.
+    
+    Query params:
+        include: Comma-separated list of extra data to bundle.
+                 Supported: "history" (price points), "bets" (trade history), "comments"
+                 Example: ?include=history,bets,comments
+    """
     db = get_db()
     validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
@@ -235,7 +314,7 @@ async def get_market(market_id: str):
     creator = db.get_user(market["creator_id"]) if market["creator_id"] else None
     creator_username = creator["username"] if creator else None
 
-    return _build_market_detail(market, creator_username)
+    return _build_market_detail(market, creator_username, include=include)
 
 
 # =============================================================================

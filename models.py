@@ -187,6 +187,10 @@ class MarketDetail(_SnakeCaseBase):
     resolution_stage: Optional[ResolutionStage] = None
     committee_size: Optional[int] = None
     votes_cast: Optional[int] = None
+    # Bundled data (included when ?include=history,bets,comments)
+    history: Optional[List["ProbabilityPoint"]] = None  # Price history for charts
+    bets: Optional[List["BetHistoryItem"]] = None  # Trade history
+    comments: Optional[List["Comment"]] = None  # Discussion
 
 
 class MarketCreated(_SnakeCaseBase):
