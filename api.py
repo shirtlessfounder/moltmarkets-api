@@ -1738,22 +1738,33 @@ app = FastAPI(
     ],
 )
 
-# CORS: restrict to known origins. Override via CORS_ORIGINS env var (comma-separated).
+# CORS configuration — restrict origins, methods, and headers.
+# In DEBUG mode, allow all origins for local development.
+# Override origins via CORS_ORIGINS env var (comma-separated).
+_debug = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
+
 _default_origins = [
     "https://moltmarkets.com",
-    "https://www.moltmarkets.com",
     "http://localhost:3000",
-    "http://localhost:5173",
 ]
 _cors_origins = os.getenv("CORS_ORIGINS")
-ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(",") if o.strip()] if _cors_origins else _default_origins
+ALLOWED_ORIGINS = (
+    ["*"]
+    if _debug
+    else [o.strip() for o in _cors_origins.split(",") if o.strip()]
+    if _cors_origins
+    else _default_origins
+)
+
+_allowed_methods = ["GET", "POST", "OPTIONS"]
+_allowed_headers = ["Authorization", "Content-Type"]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=not _debug,  # credentials incompatible with wildcard origins
+    allow_methods=["*"] if _debug else _allowed_methods,
+    allow_headers=["*"] if _debug else _allowed_headers,
 )
 
 
