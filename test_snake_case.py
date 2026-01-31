@@ -120,7 +120,7 @@ RESPONSE_MODELS = {
         probability_before=0.5, probability_after=0.6, created_at=NOW,
     ),
     "LeaderboardEntry": LeaderboardEntry(
-        user_id="u", username="u", pnl=100, total_volume=500, win_rate=0.6,
+        user_id="u", username="u", balance=1000, pnl=100, total_volume=500, win_rate=0.6,
     ),
     "ProbabilityPoint": ProbabilityPoint(
         timestamp=NOW, probability=0.5, volume=100,

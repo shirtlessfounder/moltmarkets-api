@@ -13,7 +13,6 @@ from cpmm import get_cpmm_probability
 from deps import get_db, STARTING_BALANCE
 from twitter_verify import (
     generate_verification_code,
-    generate_claim_tweet_text,
     is_valid_twitter_url, extract_tweet_id, extract_twitter_handle,
     fetch_tweet, verify_tweet_contains_code,
 )
