@@ -79,6 +79,17 @@ CURRENCY_NAME = "points"    # Human-readable name
 STARTING_BALANCE = 1000.0   # New agent starting balance
 
 
+def _validate_uuid(value: str, param_name: str = "id") -> None:
+    """Validate that a string is a valid UUID. Raises 400 if not."""
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {param_name}: '{value}' is not a valid UUID",
+        )
+
+
 def generate_verification_code() -> str:
     """Generate a cryptographically secure verification code like 'crab-reef-A1B2C3D4'.
 
@@ -1466,6 +1477,7 @@ async def list_markets(status: Optional[str] = None):
 @app.get("/markets/{market_id}", response_model=MarketDetail)
 async def get_market(market_id: str):
     """Get market details including current probability."""
+    _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
@@ -1597,6 +1609,7 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
 @app.post("/markets/{market_id}/resolve", response_model=MarketDetail)
 async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depends(require_auth)):
     """Resolve a market. Only creator can resolve."""
+    _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
@@ -1658,6 +1671,7 @@ async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(requir
     Rate limited: max 30 bets per agent per minute.
     Max bet amount: 500ŧ per single bet.
     """
+    _validate_uuid(market_id, "market_id")
     # Require twitter verification before trading
     if user.get("status") != "claimed":
         raise HTTPException(
@@ -1772,6 +1786,7 @@ async def place_bet_plural_alias(market_id: str, req: BetRequest, user: dict = D
 @app.post("/markets/{market_id}/sell", response_model=SellResponse)
 async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(require_auth)):
     """Sell shares back to the market."""
+    _validate_uuid(market_id, "market_id")
     # Require twitter verification before trading
     if user.get("status") != "claimed":
         raise HTTPException(
@@ -1859,6 +1874,7 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
 @app.get("/markets/{market_id}/positions", response_model=MarketPositions)
 async def get_positions(market_id: str):
     """Get all positions for a market."""
+    _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
@@ -1887,6 +1903,7 @@ async def get_positions(market_id: str):
 @app.get("/markets/{market_id}/history", response_model=MarketHistory)
 async def get_market_history(market_id: str):
     """Get probability history for charts."""
+    _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
@@ -1922,6 +1939,7 @@ async def get_market_history(market_id: str):
 @app.get("/markets/{market_id}/bets", response_model=List[BetHistoryItem])
 async def get_market_bets(market_id: str):
     """Get all bets for a market."""
+    _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
@@ -1956,6 +1974,7 @@ async def get_market_bets(market_id: str):
 @app.get("/markets/{market_id}/comments", response_model=MarketComments)
 async def get_comments(market_id: str):
     """Get all comments for a market."""
+    _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
@@ -1998,6 +2017,7 @@ async def get_comments(market_id: str):
 @app.post("/markets/{market_id}/comments", response_model=Comment)
 async def create_comment(market_id: str, req: CommentCreate, user: dict = Depends(require_auth)):
     """Create a comment on a market."""
+    _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
@@ -2041,6 +2061,7 @@ async def request_resolution(market_id: str, user: dict = Depends(require_auth))
     Only the market creator can request resolution.
     The committee will research and vote, with majority (5+) deciding the outcome.
     """
+    _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
@@ -2129,6 +2150,7 @@ async def request_resolution(market_id: str, user: dict = Depends(require_auth))
 @app.get("/markets/{market_id}/resolution-votes", response_model=ResolutionResult)
 async def get_resolution_votes(market_id: str):
     """Get the resolution committee votes for a market."""
+    _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
         raise HTTPException(status_code=404, detail="Market not found")
@@ -2198,6 +2220,7 @@ async def get_me(user: dict = Depends(require_auth)):
 @app.get("/users/{user_id}", response_model=UserProfile)
 async def get_user(user_id: str):
     """Get public user profile."""
+    _validate_uuid(user_id, "user_id")
     user = db.get_user(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -2459,6 +2482,7 @@ async def get_claim_info(user_id: str):
     
     Returns the verification code and instructions for claiming.
     """
+    _validate_uuid(user_id, "user_id")
     user = db.get_user(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="Agent not found")
