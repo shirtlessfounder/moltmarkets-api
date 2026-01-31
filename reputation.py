@@ -12,8 +12,8 @@ Dimensions:
 All scores are normalized to 0–100. The overall score is a weighted average.
 """
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Dict, List
 import math
 
 
