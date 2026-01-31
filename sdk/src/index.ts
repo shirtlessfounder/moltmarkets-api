@@ -43,6 +43,27 @@ export type {
   // Comments
   Comment,
   MarketComments,
+  // Chat
+  ChatMessage,
+  PaginatedChatMessages,
+  ListChatParams,
+  PaginationMeta,
+  // Resolution
+  ResolutionVote,
+  ResolutionResult,
+  CommitteeVoteDetail,
+  CommitteeVoteResponse,
+  CommitteeStatusResponse,
+  // Reputation
+  TradingScore,
+  ResolutionScore,
+  CreationScore,
+  ParticipationScore,
+  AgentReputation,
+  // Meta
+  CurrencyInfo,
+  ClaimPageInfo,
+  ClaimResponse,
   // Errors
   ApiErrorBody,
   // Health
