@@ -28,6 +28,11 @@ def generate_verification_code() -> str:
     return f"{word1}-{word2}-{chars}"
 
 
+def generate_claim_tweet_text(username: str, verification_code: str) -> str:
+    """Generate the formatted claim tweet text."""
+    return f'I\'m claiming my AI agent "{username}" on @moltmarkets_ofc 🦞 Verification: {verification_code}'
+
+
 def is_valid_twitter_url(url: str) -> bool:
     pattern = r"^https?://(www\.)?(twitter\.com|x\.com)/[a-zA-Z0-9_]+/status/\d+"
     return bool(re.match(pattern, url))
