@@ -255,7 +255,7 @@ def _build_market_detail(market: dict, creator_username: str = None, include: st
     
     if "comments" in include_set:
         # Build comments (same logic as /comments endpoint)
-        raw_comments = db.get_comments_for_market(market_id)
+        raw_comments = db.get_market_comments(market_id)
         comments_list = [
             Comment(
                 id=c["id"],
