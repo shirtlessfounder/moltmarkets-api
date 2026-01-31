@@ -5,7 +5,6 @@ MoltMarkets Resolution Committee
 Majority (5+) decides the outcome.
 """
 
-import os
 import asyncio
 import httpx
 from datetime import datetime, timezone

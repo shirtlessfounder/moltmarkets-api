@@ -12,6 +12,9 @@ import sys
 import json
 import uuid
 import logging
+import secrets
+import hashlib
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 from contextlib import asynccontextmanager
@@ -63,8 +66,8 @@ def _configure_logging() -> logging.Logger:
 
 logger = _configure_logging()
 
-from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability, Outcome as CpmmOutcome
-from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE
+from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability  # noqa: E402
+from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE  # noqa: E402
 
 
 def set_rate_limit_headers(response: Response, info: dict) -> None:
@@ -94,33 +97,28 @@ def raise_rate_limited(detail: str, info: dict) -> None:
             "X-RateLimit-Reset": str(info.get("reset", "")),
         },
     )
-import secrets
-import hashlib
-import psycopg2
-from psycopg2 import pool
-from psycopg2.extras import RealDictCursor
+import psycopg2  # noqa: E402
+from psycopg2 import pool  # noqa: E402
+from psycopg2.extras import RealDictCursor  # noqa: E402
 
-from models import (
+from models import (  # noqa: E402
     MarketCreate, MarketResolve, MarketSummary, MarketDetail, MarketCreated,
     BetRequest, BetResponse, FeeBreakdown, SellRequest, SellResponse, Position, MarketPositions,
-    UserProfile, UserMe, ErrorResponse, LeaderboardEntry,
+    UserProfile, UserMe, LeaderboardEntry,
     ProbabilityPoint, MarketHistory, BetHistoryItem,
-    AgentRegister, AgentRegistered, AgentRegisteredWithClaim, AgentKeyReset,
+    AgentRegister, AgentRegisteredWithClaim, AgentKeyReset,
     ClaimPageInfo, ClaimRequest, ClaimResponse, AgentStatus,
     CommentCreate, Comment, MarketComments,
-    ResolutionRequest, ResolutionResult, ResolutionVote,
-    ChatMessageCreate, ChatMessage, ChatChannel,
-    HumanRegister, HumanRegistered,
+    ResolutionResult, ResolutionVote,
+    ChatMessageCreate, ChatMessage, HumanRegister, HumanRegistered,
     MarketStatus, Outcome,
     AgentReputationResponse,
     TradingScoreResponse, ResolutionScoreResponse,
     CreationScoreResponse, ParticipationScoreResponse,
     PortfolioPosition, PortfolioSummary, PortfolioResponse, UserBetHistoryItem,
 )
-from resolver import resolve_market, get_resolution_summary
-from reputation import compute_reputation
-import random
-import re
+from resolver import resolve_market as resolver_resolve_market  # noqa: E402
+from reputation import compute_reputation  # noqa: E402
 
 
 # =============================================================================
@@ -2428,7 +2426,7 @@ async def request_resolution(market_id: str, user: dict = Depends(require_auth))
         raise HTTPException(status_code=500, detail="Resolution service not configured")
     
     # Run the resolution committee
-    status, outcome, votes = await resolve_market(
+    status, outcome, votes = await resolver_resolve_market(
         market_id=market_id,
         market_title=market["title"],
         market_description=market.get("description", ""),

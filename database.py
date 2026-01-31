@@ -9,7 +9,7 @@ import os
 from datetime import datetime, timezone
 from typing import AsyncGenerator
 
-from sqlalchemy import String, Float, DateTime, Enum as SQLEnum, ForeignKey, Text
+from sqlalchemy import String, Float, DateTime, ForeignKey, Text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from dotenv import load_dotenv

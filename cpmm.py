@@ -570,7 +570,7 @@ if __name__ == "__main__":
     result = calculate_cpmm_purchase(state, 10, "YES")
     
     print(f"   Initial state: pool={state.pool}, p={state.p}")
-    print(f"   Bet: 10 on YES")
+    print("   Bet: 10 on YES")
     print(f"   Shares: {result['shares']:.4f}")
     print(f"   New pool: {result['new_pool']}")
     print(f"   New p: {result['new_p']:.4f}")
@@ -597,7 +597,7 @@ if __name__ == "__main__":
     state = CpmmState(pool={"YES": 100.0, "NO": 100.0}, p=0.5)
     result = calculate_cpmm_purchase(state, 20, "NO")
     
-    print(f"   Bet: 20 on NO")
+    print("   Bet: 20 on NO")
     print(f"   Shares: {result['shares']:.4f}")
     new_prob = get_cpmm_probability(result["new_pool"], result["new_p"])
     print(f"   New probability: {new_prob:.4f}")
