@@ -6,7 +6,7 @@ Contains Storage.__init__, connection pool, _init_db, _save, and constants.
 
 import logging
 import os
-from typing import Dict
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse, unquote
 
 import psycopg2
@@ -24,9 +24,10 @@ class BaseStorage:
     Falls back to in-memory storage if DATABASE_URL is not set.
     """
 
-    def __init__(self):
-        self.database_url = os.getenv("DATABASE_URL")
-        self._pool = None
+    def __init__(self) -> None:
+        self.database_url: Optional[str] = os.getenv("DATABASE_URL")
+        self._pool: Optional[pool.ThreadedConnectionPool] = None
+        self._use_memory: bool = False
         if self.database_url:
             self._init_pool()
             self._init_db()
@@ -34,12 +35,12 @@ class BaseStorage:
             logger.warning("DATABASE_URL not set, using in-memory storage (data will be lost on restart)")
             # Fallback to in-memory for local dev without DB
             self._use_memory = True
-            self._markets: Dict[str, dict] = {}
-            self._users: Dict[str, dict] = {}
-            self._bets: Dict[str, dict] = {}
-            self._positions: Dict[str, Dict[str, dict]] = {}
+            self._markets: Dict[str, Any] = {}
+            self._users: Dict[str, Any] = {}
+            self._bets: Dict[str, Any] = {}
+            self._positions: Dict[str, Dict[str, Any]] = {}
 
-    def close_pool(self):
+    def close_pool(self) -> None:
         """Close all connections in the pool.
 
         Called during application shutdown to release database connections
@@ -52,7 +53,7 @@ class BaseStorage:
             except Exception as e:
                 logger.warning("Error closing connection pool: %s", e)
 
-    def _init_pool(self):
+    def _init_pool(self) -> None:
         """Initialize a thread-safe connection pool.
 
         Uses ThreadedConnectionPool instead of SimpleConnectionPool because
@@ -90,7 +91,7 @@ class BaseStorage:
         )
         logger.info("ThreadedConnectionPool initialized (min=%d, max=%d, keepalives=on, statement_timeout=30s)", min_conn, max_conn)
 
-    def _get_conn(self):
+    def _get_conn(self) -> Any:
         """Get a database connection from the pool.
 
         Validates the connection is alive before returning it.  If the
@@ -116,7 +117,7 @@ class BaseStorage:
             conn = self._pool.getconn()
         return conn
 
-    def _put_conn(self, conn):
+    def _put_conn(self, conn: Any) -> None:
         """Return a connection to the pool.
 
         Always rolls back any uncommitted transaction first so the next
@@ -134,7 +135,7 @@ class BaseStorage:
             return
         self._pool.putconn(conn)
 
-    def _init_db(self):
+    def _init_db(self) -> None:
         """Initialize database tables."""
         self._use_memory = False
         conn = self._get_conn()
@@ -174,6 +175,9 @@ class BaseStorage:
                         END IF;
                         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='twitter_handle') THEN
                             ALTER TABLE users ADD COLUMN twitter_handle VARCHAR(100);
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='is_sandbox') THEN
+                            ALTER TABLE users ADD COLUMN is_sandbox BOOLEAN DEFAULT FALSE;
                         END IF;
                     END $$;
                 """)
@@ -356,6 +360,6 @@ class BaseStorage:
 
     # --- Utility ---
 
-    def _save(self):
+    def _save(self) -> None:
         """No-op for PostgreSQL (kept for compatibility)."""
         pass

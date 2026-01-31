@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from storage._hash import hash_api_key
+from storage.types import UserDict
 
 
 class UserStorageMixin:
@@ -14,7 +15,7 @@ class UserStorageMixin:
 
     # --- Users ---
 
-    def get_user(self, user_id: str) -> Optional[dict]:
+    def get_user(self, user_id: str) -> Optional[UserDict]:
         if self._use_memory:
             return self._users.get(user_id)
         conn = self._get_conn()
@@ -27,26 +28,28 @@ class UserStorageMixin:
             self._put_conn(conn)
 
     def create_user(self, user_id: str, username: str, balance: float = 1000.0,
-                    api_key_hash: str = None, description: str = "",
-                    status: str = "pending", verification_code: str = None,
-                    user_type: str = "agent") -> dict:
+                    api_key_hash: Optional[str] = None, description: str = "",
+                    status: str = "pending", verification_code: Optional[str] = None,
+                    user_type: str = "agent", is_sandbox: bool = False) -> UserDict:
         if self._use_memory:
-            user = {
-                "id": user_id,
-                "username": username,
-                "display_name": username,
-                "description": description,
-                "balance": balance,
-                "created_at": datetime.now(timezone.utc),
-                "markets_created": 0,
-                "total_bets": 0,
-                "profit_all_time": 0.0,
-                "api_key_hash": api_key_hash,
-                "status": status,
-                "verification_code": verification_code,
-                "twitter_handle": None,
-                "user_type": user_type,
-            }
+            user = UserDict(
+                id=user_id,
+                username=username,
+                display_name=username,
+                description=description,
+                balance=balance,
+                created_at=datetime.now(timezone.utc),
+                markets_created=0,
+                total_bets=0,
+                profit_all_time=0.0,
+                api_key_hash=api_key_hash,
+                status=status,
+                verification_code=verification_code,
+                last_market_created_at=None,
+                twitter_handle=None,
+                user_type=user_type,
+                is_sandbox=is_sandbox,
+            )
             self._users[user_id] = user
             return user
 
@@ -54,17 +57,17 @@ class UserStorageMixin:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO users (id, username, display_name, description, balance, api_key_hash, status, verification_code, user_type)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO users (id, username, display_name, description, balance, api_key_hash, status, verification_code, user_type, is_sandbox)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
-                """, (user_id, username, username, description, balance, api_key_hash, status, verification_code, user_type))
+                """, (user_id, username, username, description, balance, api_key_hash, status, verification_code, user_type, is_sandbox))
                 row = cur.fetchone()
                 conn.commit()
                 return self._row_to_user(row)
         finally:
             self._put_conn(conn)
 
-    def get_user_by_api_key(self, api_key: str) -> Optional[dict]:
+    def get_user_by_api_key(self, api_key: str) -> Optional[UserDict]:
         """Find user by API key."""
         key_hash = hash_api_key(api_key)
         if self._use_memory:
@@ -82,7 +85,7 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def get_user_by_username(self, username: str) -> Optional[dict]:
+    def get_user_by_username(self, username: str) -> Optional[UserDict]:
         """Find user by username (case-insensitive)."""
         username_lower = username.lower()
         if self._use_memory:
@@ -100,7 +103,7 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def update_api_key(self, user_id: str, new_key_hash: str):
+    def update_api_key(self, user_id: str, new_key_hash: str) -> None:
         """Update user's API key hash."""
         if self._use_memory:
             self._users[user_id]["api_key_hash"] = new_key_hash
@@ -132,7 +135,7 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def update_user_display_name(self, user_id: str, display_name: str):
+    def update_user_display_name(self, user_id: str, display_name: str) -> None:
         """Update user's display name."""
         if self._use_memory:
             self._users[user_id]["display_name"] = display_name
@@ -146,7 +149,7 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def delete_user(self, user_id: str):
+    def delete_user(self, user_id: str) -> None:
         """Delete a user and all their data (admin only)."""
         if self._use_memory:
             if user_id in self._users:
@@ -168,7 +171,7 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def update_user_api_key(self, user_id: str, key_hash: str):
+    def update_user_api_key(self, user_id: str, key_hash: str) -> None:
         """Update a user's API key hash (for key regeneration)."""
         if self._use_memory:
             if user_id in self._users:
@@ -183,7 +186,7 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def increment_user_markets_created(self, user_id: str):
+    def increment_user_markets_created(self, user_id: str) -> None:
         """Increment user's markets_created counter."""
         if self._use_memory:
             self._users[user_id]["markets_created"] += 1
@@ -197,7 +200,7 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def increment_user_total_bets(self, user_id: str):
+    def increment_user_total_bets(self, user_id: str) -> None:
         """Increment user's total_bets counter."""
         if self._use_memory:
             self._users[user_id]["total_bets"] += 1
@@ -211,7 +214,7 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def update_user_profit(self, user_id: str, profit_delta: float):
+    def update_user_profit(self, user_id: str, profit_delta: float) -> None:
         """Update user's profit_all_time."""
         if self._use_memory:
             self._users[user_id]["profit_all_time"] += profit_delta
@@ -225,7 +228,7 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def update_user_status(self, user_id: str, status: str):
+    def update_user_status(self, user_id: str, status: str) -> None:
         """Update user's claim status."""
         if self._use_memory:
             self._users[user_id]["status"] = status
@@ -239,7 +242,7 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def update_user_last_market_created(self, user_id: str):
+    def update_user_last_market_created(self, user_id: str) -> None:
         """Update timestamp when user last created a market (for rate limiting)."""
         now = datetime.now(timezone.utc)
         if self._use_memory:
@@ -257,7 +260,7 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def update_user_twitter_handle(self, user_id: str, twitter_handle: str):
+    def update_user_twitter_handle(self, user_id: str, twitter_handle: str) -> None:
         """Update user's twitter handle (from verification tweet)."""
         if self._use_memory:
             self._users[user_id]["twitter_handle"] = twitter_handle
@@ -290,8 +293,40 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
+    def reset_sandbox_balance(self, user_id: str, amount: float) -> float:
+        """Reset a sandbox agent's balance and stats.
+
+        Sets balance to *amount*, resets total_bets and profit_all_time to 0.
+        Returns the new balance, or -1.0 on failure.
+        """
+        if self._use_memory:
+            user = self._users.get(user_id)
+            if not user:
+                return -1.0
+            user["balance"] = amount
+            user["total_bets"] = 0
+            user["profit_all_time"] = 0.0
+            return amount
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE users
+                    SET balance = %s, total_bets = 0, profit_all_time = 0.0
+                    WHERE id = %s
+                    RETURNING balance
+                """, (amount, user_id))
+                row = cur.fetchone()
+                conn.commit()
+                if row:
+                    return float(row["balance"])
+                return -1.0
+        finally:
+            self._put_conn(conn)
+
     @property
-    def users(self) -> Dict[str, dict]:
+    def users(self) -> Dict[str, UserDict]:
         """Get all users as dict.
 
         .. deprecated::

@@ -5,6 +5,7 @@ MoltMarkets Storage — position operations.
 from typing import List, Optional
 
 from models import Outcome
+from storage.types import PositionDict
 
 
 class PositionStorageMixin:
@@ -12,7 +13,7 @@ class PositionStorageMixin:
 
     # --- Positions ---
 
-    def get_position(self, market_id: str, user_id: str) -> Optional[dict]:
+    def get_position(self, market_id: str, user_id: str) -> Optional[PositionDict]:
         if self._use_memory:
             return self._positions.get(market_id, {}).get(user_id)
 
@@ -25,7 +26,7 @@ class PositionStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def get_market_positions(self, market_id: str) -> List[dict]:
+    def get_market_positions(self, market_id: str) -> List[PositionDict]:
         if self._use_memory:
             return list(self._positions.get(market_id, {}).values())
 
@@ -39,7 +40,7 @@ class PositionStorageMixin:
             self._put_conn(conn)
 
     def update_position(self, market_id: str, user_id: str,
-                        outcome: Outcome, shares_delta: float, invested_delta: float):
+                        outcome: Outcome, shares_delta: float, invested_delta: float) -> None:
         if self._use_memory:
             if market_id not in self._positions:
                 self._positions[market_id] = {}
@@ -83,10 +84,10 @@ class PositionStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def get_user_positions(self, user_id: str) -> List[dict]:
+    def get_user_positions(self, user_id: str) -> List[PositionDict]:
         """Get all positions for a user across all markets."""
         if self._use_memory:
-            positions = []
+            positions: List[PositionDict] = []
             for market_id, market_positions in self._positions.items():
                 if user_id in market_positions:
                     positions.append(market_positions[user_id])
@@ -105,7 +106,7 @@ class PositionStorageMixin:
             self._put_conn(conn)
 
     def reduce_position(self, market_id: str, user_id: str,
-                        outcome: Outcome, shares: float):
+                        outcome: Outcome, shares: float) -> None:
         """Reduce shares in a position (for selling)."""
         if self._use_memory:
             if market_id in self._positions and user_id in self._positions[market_id]:

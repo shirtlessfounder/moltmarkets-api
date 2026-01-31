@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from models import MarketStatus, Outcome
+from storage.types import MarketDict, MarketWithCreatorDict
 
 
 class MarketStorageMixin:
@@ -14,7 +15,7 @@ class MarketStorageMixin:
 
     # --- Markets ---
 
-    def get_market(self, market_id: str) -> Optional[dict]:
+    def get_market(self, market_id: str) -> Optional[MarketDict]:
         if self._use_memory:
             return self._markets.get(market_id)
 
@@ -27,7 +28,7 @@ class MarketStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def list_markets(self) -> List[dict]:
+    def list_markets(self) -> List[MarketDict]:
         if self._use_memory:
             return list(self._markets.values())
 
@@ -40,16 +41,16 @@ class MarketStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def list_markets_with_creators(self) -> List[dict]:
+    def list_markets_with_creators(self) -> List[MarketWithCreatorDict]:
         """List all markets with creator usernames in a single JOIN query.
 
         Eliminates N+1: previously list_markets + N × get_user calls.
         Now: 1 query total.
         """
         if self._use_memory:
-            results = []
+            results: List[MarketWithCreatorDict] = []
             for m in self._markets.values():
-                market = dict(m)
+                market = MarketWithCreatorDict(**m)
                 creator = self._users.get(m["creator_id"])
                 market["creator_username"] = creator["username"] if creator else None
                 results.append(market)
@@ -65,9 +66,9 @@ class MarketStorageMixin:
                     ORDER BY m.created_at DESC
                 """)
                 rows = cur.fetchall()
-                results = []
+                results: List[MarketWithCreatorDict] = []
                 for row in rows:
-                    market = self._row_to_market(row)
+                    market = MarketWithCreatorDict(**self._row_to_market(row))
                     market["creator_username"] = row.get("creator_username")
                     results.append(market)
                 return results
@@ -93,7 +94,7 @@ class MarketStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def get_markets_by_ids(self, market_ids: set) -> Dict[str, dict]:
+    def get_markets_by_ids(self, market_ids: set) -> Dict[str, MarketDict]:
         """Get specific markets by their IDs in a single query.
 
         Returns a dict of {market_id: market_dict} for only the requested IDs.
@@ -119,7 +120,7 @@ class MarketStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def get_markets_by_creator(self, creator_id: str) -> List[dict]:
+    def get_markets_by_creator(self, creator_id: str) -> List[MarketDict]:
         """Get all markets created by a specific user.
 
         Uses idx_markets_creator index for O(1) lookup.
@@ -142,7 +143,7 @@ class MarketStorageMixin:
             self._put_conn(conn)
 
     @property
-    def markets(self) -> Dict[str, dict]:
+    def markets(self) -> Dict[str, MarketDict]:
         """Get all markets as dict.
 
         .. deprecated::
@@ -172,24 +173,26 @@ class MarketStorageMixin:
 
     def create_market(self, market_id: str, creator_id: str, title: str,
                       description: str, closes_at: datetime,
-                      initial_liquidity: float) -> dict:
+                      initial_liquidity: float) -> MarketDict:
         if self._use_memory:
             pool = {"YES": initial_liquidity, "NO": initial_liquidity}
-            market = {
-                "id": market_id,
-                "title": title,
-                "description": description,
-                "status": MarketStatus.OPEN,
-                "closes_at": closes_at,
-                "created_at": datetime.now(timezone.utc),
-                "resolved_at": None,
-                "resolution": None,
-                "total_volume": 0.0,
-                "creator_id": creator_id,
-                "pool": pool,
-                "p": 0.5,
-                "version": 1,
-            }
+            market = MarketDict(
+                id=market_id,
+                title=title,
+                description=description,
+                status=MarketStatus.OPEN,
+                closes_at=closes_at,
+                created_at=datetime.now(timezone.utc),
+                resolved_at=None,
+                resolution=None,
+                total_volume=0.0,
+                creator_id=creator_id,
+                pool=pool,
+                p=0.5,
+                version=1,
+                committee=None,
+                resolution_deadline=None,
+            )
             self._markets[market_id] = market
             self._positions[market_id] = {}
             self._users[creator_id]["markets_created"] += 1
@@ -212,7 +215,7 @@ class MarketStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def update_market_pool(self, market_id: str, new_pool: dict, new_p: float, volume_delta: float):
+    def update_market_pool(self, market_id: str, new_pool: dict, new_p: float, volume_delta: float) -> None:
         if self._use_memory:
             market = self._markets[market_id]
             market["pool"] = new_pool
@@ -323,7 +326,7 @@ class MarketStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def update_market_status(self, market_id: str, status: MarketStatus):
+    def update_market_status(self, market_id: str, status: MarketStatus) -> None:
         """Update a market's status (e.g. OPEN → RESOLVING)."""
         if self._use_memory:
             market = self._markets[market_id]
@@ -369,7 +372,7 @@ class MarketStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def resolve_market(self, market_id: str, outcome: Outcome):
+    def resolve_market(self, market_id: str, outcome: Outcome) -> None:
         if self._use_memory:
             market = self._markets[market_id]
             market["status"] = MarketStatus.RESOLVED

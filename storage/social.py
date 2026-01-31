@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from storage.types import ChatMessageDict, CommentDict, ResolutionVoteDict
+
 
 class SocialStorageMixin:
     """Mixin providing comments, chat messages, and resolution vote methods."""
@@ -14,17 +16,17 @@ class SocialStorageMixin:
     # --- Comments ---
 
     def create_comment(self, comment_id: str, market_id: str, user_id: str,
-                       content: str, parent_id: Optional[str] = None) -> dict:
+                       content: str, parent_id: Optional[str] = None) -> CommentDict:
         """Create a new comment on a market."""
         now = datetime.now(timezone.utc)
-        comment = {
-            "id": comment_id,
-            "market_id": market_id,
-            "user_id": user_id,
-            "content": content,
-            "parent_id": parent_id,
-            "created_at": now,
-        }
+        comment = CommentDict(
+            id=comment_id,
+            market_id=market_id,
+            user_id=user_id,
+            content=content,
+            parent_id=parent_id,
+            created_at=now,
+        )
 
         if self._use_memory:
             if not hasattr(self, '_comments'):
@@ -45,7 +47,11 @@ class SocialStorageMixin:
         return comment
 
     def get_market_comments(self, market_id: str) -> List[dict]:
-        """Get all comments for a market, ordered by creation time."""
+        """Get all comments for a market, ordered by creation time.
+
+        Returns dicts that may include a ``username`` key from the JOIN query
+        (DB path) or plain CommentDicts (in-memory path).
+        """
         if self._use_memory:
             if not hasattr(self, '_comments'):
                 return []
@@ -71,7 +77,7 @@ class SocialStorageMixin:
 
     # --- Resolution Votes ---
 
-    def save_resolution_votes(self, market_id: str, votes: List[dict]):
+    def save_resolution_votes(self, market_id: str, votes: List[dict]) -> None:
         """Save resolution votes for a market."""
         if self._use_memory:
             if not hasattr(self, '_resolution_votes'):
@@ -100,7 +106,7 @@ class SocialStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def get_resolution_votes(self, market_id: str) -> List[dict]:
+    def get_resolution_votes(self, market_id: str) -> List[ResolutionVoteDict]:
         """Get all resolution votes for a market."""
         if self._use_memory:
             if not hasattr(self, '_resolution_votes'):
@@ -117,10 +123,15 @@ class SocialStorageMixin:
                 """, (market_id,))
                 rows = cur.fetchall()
                 return [
-                    {
-                        **dict(row),
-                        "sources": json.loads(row["sources"]) if row["sources"] else []
-                    }
+                    ResolutionVoteDict(
+                        id=row["id"],
+                        market_id=row["market_id"],
+                        agent_id=row["agent_id"],
+                        vote=row["vote"],
+                        reasoning=row["reasoning"],
+                        sources=json.loads(row["sources"]) if row["sources"] else [],
+                        created_at=row["created_at"],
+                    )
                     for row in rows
                 ]
         finally:
@@ -128,18 +139,18 @@ class SocialStorageMixin:
 
     # --- Chat Messages ---
 
-    def create_chat_message(self, user_id: str, username: str, text: str, channel: str = "agents") -> dict:
+    def create_chat_message(self, user_id: str, username: str, text: str, channel: str = "agents") -> ChatMessageDict:
         """Create a new chat message."""
         now = datetime.now(timezone.utc)
         msg_id = str(uuid.uuid4())
-        message = {
-            "id": msg_id,
-            "user_id": user_id,
-            "username": username,
-            "text": text,
-            "channel": channel,
-            "created_at": now,
-        }
+        message = ChatMessageDict(
+            id=msg_id,
+            user_id=user_id,
+            username=username,
+            text=text,
+            channel=channel,
+            created_at=now,
+        )
 
         if self._use_memory:
             if not hasattr(self, '_chat_messages'):
@@ -157,11 +168,18 @@ class SocialStorageMixin:
                 """, (msg_id, user_id, username, text, channel, now))
                 row = cur.fetchone()
                 conn.commit()
-                return dict(row)
+                return ChatMessageDict(
+                    id=str(row["id"]),
+                    user_id=row["user_id"],
+                    username=row["username"],
+                    text=row["text"],
+                    channel=row["channel"],
+                    created_at=row["created_at"],
+                )
         finally:
             self._put_conn(conn)
 
-    def get_chat_messages(self, limit: int = 50, since: Optional[datetime] = None, channel: str = "agents") -> List[dict]:
+    def get_chat_messages(self, limit: int = 50, since: Optional[datetime] = None, channel: str = "agents") -> List[ChatMessageDict]:
         """Get recent chat messages, optionally filtering by since timestamp and channel."""
         if self._use_memory:
             if not hasattr(self, '_chat_messages'):
@@ -177,7 +195,7 @@ class SocialStorageMixin:
             with conn.cursor() as cur:
                 if since:
                     cur.execute("""
-                        SELECT id, username, text, channel, created_at
+                        SELECT id, user_id, username, text, channel, created_at
                         FROM chat_messages
                         WHERE channel = %s AND created_at > %s
                         ORDER BY created_at DESC
@@ -185,13 +203,23 @@ class SocialStorageMixin:
                     """, (channel, since, limit))
                 else:
                     cur.execute("""
-                        SELECT id, username, text, channel, created_at
+                        SELECT id, user_id, username, text, channel, created_at
                         FROM chat_messages
                         WHERE channel = %s
                         ORDER BY created_at DESC
                         LIMIT %s
                     """, (channel, limit))
                 rows = cur.fetchall()
-                return [dict(row) for row in rows]
+                return [
+                    ChatMessageDict(
+                        id=str(row["id"]),
+                        user_id=row["user_id"],
+                        username=row["username"],
+                        text=row["text"],
+                        channel=row["channel"],
+                        created_at=row["created_at"],
+                    )
+                    for row in rows
+                ]
         finally:
             self._put_conn(conn)
