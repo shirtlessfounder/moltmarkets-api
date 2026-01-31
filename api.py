@@ -38,11 +38,13 @@ from models import (
     ResolutionResult, ResolutionVote,
     ChatMessageCreate, ChatMessage,
     HumanRegister, HumanRegistered,
-    MarketStatus, Outcome,
+    MarketStatus, Outcome, CommitteeVoteOutcome,
     AgentReputationResponse,
     TradingScoreResponse, ResolutionScoreResponse,
     CreationScoreResponse, ParticipationScoreResponse,
     PortfolioPosition, PortfolioSummary, PortfolioResponse, UserBetHistoryItem,
+    CommitteeVoteRequest, CommitteeVoteResponse, CommitteeVoteDetail,
+    CommitteeMember, CommitteeStatusResponse,
 )
 from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE
 from reputation import compute_reputation
@@ -445,7 +447,7 @@ class Storage:
                     )
                 """)
                 
-                # Resolution votes table
+                # Resolution votes table (legacy AI resolver)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS resolution_votes (
                         id VARCHAR(255) PRIMARY KEY,
@@ -455,6 +457,18 @@ class Storage:
                         reasoning TEXT,
                         sources TEXT,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                
+                # Committee resolution votes table (#28)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS committee_votes (
+                        id VARCHAR(255) PRIMARY KEY,
+                        market_id VARCHAR(255) REFERENCES markets(id),
+                        agent_id VARCHAR(255) NOT NULL,
+                        outcome VARCHAR(10) NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        UNIQUE(market_id, agent_id)
                     )
                 """)
                 
@@ -480,6 +494,12 @@ class Storage:
                         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='user_type') THEN
                             ALTER TABLE users ADD COLUMN user_type VARCHAR(20) DEFAULT 'agent';
                         END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='markets' AND column_name='committee') THEN
+                            ALTER TABLE markets ADD COLUMN committee TEXT;
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='markets' AND column_name='resolution_deadline') THEN
+                            ALTER TABLE markets ADD COLUMN resolution_deadline TIMESTAMP WITH TIME ZONE;
+                        END IF;
                     END $$;
                 """)
                 
@@ -500,6 +520,7 @@ class Storage:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_closes_at ON markets(closes_at)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users(LOWER(username))")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_committee_votes_market ON committee_votes(market_id)")
                 
                 conn.commit()
                 print("Database tables initialized")
@@ -532,6 +553,9 @@ class Storage:
         """Convert database row to market dict."""
         if not row:
             return None
+        # Parse committee JSON if present
+        committee_raw = row.get("committee")
+        committee = json.loads(committee_raw) if committee_raw else None
         return {
             "id": row["id"],
             "title": row["title"],
@@ -545,6 +569,8 @@ class Storage:
             "creator_id": row["creator_id"],
             "pool": {"YES": float(row["pool_yes"]), "NO": float(row["pool_no"])},
             "p": float(row["p"]),
+            "committee": committee,
+            "resolution_deadline": row.get("resolution_deadline"),
         }
     
     def _row_to_bet(self, row: dict) -> dict:
@@ -939,6 +965,8 @@ class Storage:
                 "creator_id": creator_id,
                 "pool": pool,
                 "p": 0.5,
+                "committee": None,
+                "resolution_deadline": None,
             }
             self._markets[market_id] = market
             self._positions[market_id] = {}
@@ -1518,6 +1546,126 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    # --- Committee Resolution (#28) ---
+    
+    def set_market_committee(self, market_id: str, committee: List[str], deadline: datetime):
+        """Set the resolution committee and deadline for a market."""
+        if self._use_memory:
+            market = self._markets[market_id]
+            market["committee"] = committee
+            market["resolution_deadline"] = deadline
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE markets SET committee = %s, resolution_deadline = %s
+                    WHERE id = %s
+                """, (json.dumps(committee), deadline, market_id))
+                conn.commit()
+        finally:
+            self._put_conn(conn)
+    
+    def save_committee_vote(self, market_id: str, agent_id: str, outcome: str) -> dict:
+        """Save a committee resolution vote (upsert — one vote per agent per market)."""
+        now = datetime.now(timezone.utc)
+        vote_id = str(uuid.uuid4())
+        vote = {
+            "id": vote_id,
+            "market_id": market_id,
+            "agent_id": agent_id,
+            "outcome": outcome,
+            "created_at": now,
+        }
+        
+        if self._use_memory:
+            if not hasattr(self, '_committee_votes'):
+                self._committee_votes = {}
+            key = f"{market_id}:{agent_id}"
+            self._committee_votes[key] = vote
+            return vote
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO committee_votes (id, market_id, agent_id, outcome, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (market_id, agent_id) DO UPDATE
+                    SET outcome = EXCLUDED.outcome, created_at = EXCLUDED.created_at
+                    RETURNING *
+                """, (vote_id, market_id, agent_id, outcome, now))
+                row = cur.fetchone()
+                conn.commit()
+                return dict(row) if row else vote
+        finally:
+            self._put_conn(conn)
+    
+    def get_committee_votes(self, market_id: str) -> List[dict]:
+        """Get all committee votes for a market."""
+        if self._use_memory:
+            if not hasattr(self, '_committee_votes'):
+                return []
+            return [
+                v for v in self._committee_votes.values()
+                if v["market_id"] == market_id
+            ]
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT cv.*, u.username
+                    FROM committee_votes cv
+                    LEFT JOIN users u ON cv.agent_id = u.id
+                    WHERE cv.market_id = %s
+                    ORDER BY cv.created_at ASC
+                """, (market_id,))
+                rows = cur.fetchall()
+                return [dict(row) for row in rows]
+        finally:
+            self._put_conn(conn)
+    
+    def get_top_traders_for_market(self, market_id: str, exclude_id: str, limit: int = 2) -> List[dict]:
+        """Get the highest-reputation agents who traded on a market.
+        
+        Used to form the resolution committee: creator + top N traders.
+        Returns user dicts sorted by reputation (overall_score descending).
+        """
+        if self._use_memory:
+            # Collect unique trader IDs (excluding the creator)
+            trader_ids = set()
+            for b in self._bets.values():
+                if b["market_id"] == market_id and b["user_id"] != exclude_id:
+                    trader_ids.add(b["user_id"])
+            
+            # Get user objects and sort by profit as proxy for reputation
+            traders = []
+            for uid in trader_ids:
+                user = self._users.get(uid)
+                if user:
+                    traders.append(user)
+            traders.sort(key=lambda u: float(u.get("profit_all_time", 0)), reverse=True)
+            return traders[:limit]
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                # Get unique traders on this market, sorted by profit_all_time (reputation proxy)
+                cur.execute("""
+                    SELECT DISTINCT u.*
+                    FROM bets b
+                    JOIN users u ON b.user_id = u.id
+                    WHERE b.market_id = %s AND b.user_id != %s
+                    ORDER BY u.profit_all_time DESC
+                    LIMIT %s
+                """, (market_id, exclude_id, limit))
+                rows = cur.fetchall()
+                return [self._row_to_user(row) for row in rows]
+        finally:
+            self._put_conn(conn)
+    
     # --- Chat Messages ---
     
     def create_chat_message(self, user_id: str, username: str, text: str, channel: str = "agents") -> dict:
@@ -1823,11 +1971,14 @@ async def list_markets(status: Optional[str] = None):
     markets = db.list_markets_with_creators()
 
     # Auto-transition: move OPEN markets past closes_at to RESOLVING
+    # and form committees for newly-resolving markets (#28)
     now = datetime.now(timezone.utc)
     for m in markets:
         if m["status"] == MarketStatus.OPEN and m["closes_at"] <= now:
             db.update_market_status(m["id"], MarketStatus.RESOLVING)
             m["status"] = MarketStatus.RESOLVING
+        if m["status"] == MarketStatus.RESOLVING and m.get("committee") is None:
+            _ensure_committee(m["id"], m)
 
     # Apply status filter (default: only open/active markets)
     status_filter = (status or "active").strip().upper()
@@ -1869,9 +2020,22 @@ async def get_market(market_id: str):
         db.update_market_status(market_id, MarketStatus.RESOLVING)
         market["status"] = MarketStatus.RESOLVING
     
+    # Form committee when entering RESOLVING (if not already formed)
+    if market["status"] == MarketStatus.RESOLVING:
+        market = _ensure_committee(market_id, market)
+    
     # Look up creator username
     creator = db.get_user(market["creator_id"]) if market["creator_id"] else None
     creator_username = creator["username"] if creator else None
+    
+    # Get committee votes if committee exists
+    committee_votes_raw = None
+    if market.get("committee"):
+        cvotes = db.get_committee_votes(market_id)
+        committee_votes_raw = [
+            {"agent_id": v["agent_id"], "outcome": v["outcome"], "timestamp": v["created_at"].isoformat() if hasattr(v["created_at"], 'isoformat') else str(v["created_at"])}
+            for v in cvotes
+        ]
     
     return MarketDetail(
         id=market["id"],
@@ -1888,6 +2052,9 @@ async def get_market(market_id: str):
         creator_username=creator_username,
         pool=market["pool"],
         p=market["p"],
+        committee=market.get("committee"),
+        resolution_votes=committee_votes_raw,
+        resolution_deadline=market.get("resolution_deadline"),
     )
 
 
@@ -1989,7 +2156,16 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
 
 @app.post("/markets/{market_id}/resolve", response_model=MarketDetail, tags=["markets"])
 async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depends(require_auth)):
-    """Resolve a market. Only creator can resolve."""
+    """Resolve a market. Only creator can resolve.
+    
+    With committee resolution (#28), the creator can only directly resolve if:
+    1. The committee voted unanimously (market auto-resolved already), OR
+    2. The 30-minute resolution deadline has passed (creator fallback), OR
+    3. No committee has been formed yet (no other traders on the market).
+    
+    During the committee voting window, the creator must use
+    POST /markets/{id}/resolution-vote instead.
+    """
     _validate_uuid(market_id, "market_id")
     market = db.get_market(market_id)
     if not market:
@@ -2006,6 +2182,33 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
     if market["status"] == MarketStatus.OPEN and market["closes_at"] <= now:
         db.update_market_status(market_id, MarketStatus.RESOLVING)
         market["status"] = MarketStatus.RESOLVING
+    
+    # Committee resolution gate (#28)
+    # Ensure committee is formed when market is RESOLVING
+    if market["status"] == MarketStatus.RESOLVING:
+        market = _ensure_committee(market_id, market)
+        committee = market.get("committee") or []
+        deadline = market.get("resolution_deadline")
+        
+        # If committee has more than just creator, enforce committee rules
+        if len(committee) > 1:
+            votes = db.get_committee_votes(market_id)
+            unanimous = _check_unanimous(votes, committee)
+            
+            if unanimous and unanimous in ("YES", "NO"):
+                # Already resolved by unanimity (shouldn't reach here, but just in case)
+                pass
+            elif deadline and now < deadline:
+                # Deadline hasn't passed — creator must wait for committee
+                remaining_mins = (deadline - now).total_seconds() / 60
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Committee voting is in progress. Use POST /markets/{market_id}/resolution-vote to cast your vote. "
+                           f"Creator fallback available in {remaining_mins:.0f} minutes."
+                )
+            else:
+                # Deadline passed — creator fallback: allow resolve
+                logger.info(f"Market {market_id}: deadline passed, creator {user['id']} resolving via fallback")
     
     db.resolve_market(market_id, req.outcome)
     _calculate_and_distribute_payouts(market_id, req.outcome)
@@ -2582,6 +2785,220 @@ async def get_resolution_votes(market_id: str):
             for v in votes
         ],
         resolved_at=market.get("resolved_at"),
+    )
+
+
+# =============================================================================
+# Committee Resolution Endpoints (#28)
+# =============================================================================
+
+COMMITTEE_SIZE = 3
+COMMITTEE_DEADLINE_MINUTES = 30
+
+
+def _form_committee(market: dict) -> List[str]:
+    """Form a 3-member resolution committee for a market.
+    
+    Committee = market creator + 2 highest-reputation agents who traded on the market.
+    If fewer than 2 other traders exist, the committee is smaller (creator always included).
+    """
+    creator_id = market["creator_id"]
+    top_traders = db.get_top_traders_for_market(market["id"], exclude_id=creator_id, limit=2)
+    committee = [creator_id] + [t["id"] for t in top_traders]
+    return committee
+
+
+def _ensure_committee(market_id: str, market: dict) -> dict:
+    """Ensure the market has a committee formed. Forms one if needed.
+    
+    Returns the updated market dict.
+    """
+    if market.get("committee") is None:
+        committee = _form_committee(market)
+        deadline = datetime.now(timezone.utc) + timedelta(minutes=COMMITTEE_DEADLINE_MINUTES)
+        db.set_market_committee(market_id, committee, deadline)
+        market["committee"] = committee
+        market["resolution_deadline"] = deadline
+    return market
+
+
+def _check_unanimous(votes: List[dict], committee: List[str]) -> Optional[str]:
+    """Check if all committee members voted the same way.
+    
+    Returns the unanimous outcome string if all members agree, None otherwise.
+    """
+    if len(votes) < len(committee):
+        return None
+    
+    vote_map = {v["agent_id"]: v["outcome"] for v in votes}
+    outcomes = set()
+    for member_id in committee:
+        if member_id not in vote_map:
+            return None
+        outcomes.add(vote_map[member_id])
+    
+    if len(outcomes) == 1:
+        return outcomes.pop()
+    return None
+
+
+@app.post("/markets/{market_id}/resolution-vote", response_model=CommitteeVoteResponse, tags=["markets"])
+async def cast_committee_vote(market_id: str, req: CommitteeVoteRequest, user: dict = Depends(require_auth)):
+    """Cast a resolution vote as a committee member.
+    
+    Only members of the resolution committee can vote. Committee is formed
+    automatically when the market enters RESOLVING state:
+    - Market creator
+    - 2 highest-reputation agents who traded on the market
+    
+    All 3 must agree (unanimous) for the market to auto-resolve.
+    If no unanimous decision within 30 minutes, the creator gets final say
+    via POST /markets/{id}/resolve.
+    
+    Vote outcomes: YES, NO, or INVALID.
+    """
+    _validate_uuid(market_id, "market_id")
+    market = db.get_market(market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    
+    if market["status"] == MarketStatus.RESOLVED:
+        raise HTTPException(status_code=400, detail="Market already resolved")
+    
+    # Auto-transition OPEN → RESOLVING if closes_at has passed
+    now = datetime.now(timezone.utc)
+    if market["status"] == MarketStatus.OPEN and market["closes_at"] <= now:
+        db.update_market_status(market_id, MarketStatus.RESOLVING)
+        market["status"] = MarketStatus.RESOLVING
+    
+    if market["status"] != MarketStatus.RESOLVING:
+        raise HTTPException(
+            status_code=400,
+            detail="Market must be in RESOLVING state to vote. Current status: " + market["status"].value
+        )
+    
+    # Ensure committee is formed
+    market = _ensure_committee(market_id, market)
+    committee = market["committee"]
+    
+    # Check if user is on the committee
+    if user["id"] not in committee:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not on the resolution committee for this market. "
+                   f"Committee members: {committee}"
+        )
+    
+    # Save the vote (upsert — allows changing vote)
+    db.save_committee_vote(market_id, user["id"], req.outcome.value)
+    
+    # Get all current votes
+    votes = db.get_committee_votes(market_id)
+    votes_cast = len(votes)
+    
+    # Check for unanimity
+    unanimous_outcome = _check_unanimous(votes, committee)
+    auto_resolved = False
+    resolved_outcome = None
+    
+    if unanimous_outcome and unanimous_outcome in ("YES", "NO"):
+        # Auto-resolve the market
+        outcome_enum = Outcome.YES if unanimous_outcome == "YES" else Outcome.NO
+        db.resolve_market(market_id, outcome_enum)
+        _calculate_and_distribute_payouts(market_id, outcome_enum)
+        auto_resolved = True
+        resolved_outcome = outcome_enum
+        message = f"Market resolved as {unanimous_outcome} by unanimous committee vote!"
+    elif unanimous_outcome == "INVALID":
+        message = "All committee members voted INVALID. Market creator can resolve via fallback after deadline."
+    elif votes_cast >= len(committee):
+        message = "All votes cast but no unanimity. Creator can resolve after deadline passes."
+    else:
+        remaining = len(committee) - votes_cast
+        message = f"Vote recorded. {remaining} more vote(s) needed for potential unanimity."
+    
+    return CommitteeVoteResponse(
+        market_id=market_id,
+        agent_id=user["id"],
+        outcome=req.outcome,
+        created_at=datetime.now(timezone.utc),
+        votes_cast=votes_cast,
+        votes_required=len(committee),
+        unanimous=(unanimous_outcome is not None),
+        auto_resolved=auto_resolved,
+        resolved_outcome=resolved_outcome,
+        message=message,
+    )
+
+
+@app.get("/markets/{market_id}/committee-votes", response_model=CommitteeStatusResponse, tags=["markets"])
+async def get_committee_votes(market_id: str):
+    """Get the committee resolution status and votes for a market.
+    
+    Shows the committee members, their votes, the deadline, and whether
+    the market can be resolved by creator fallback.
+    """
+    _validate_uuid(market_id, "market_id")
+    market = db.get_market(market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    
+    committee = market.get("committee") or []
+    deadline = market.get("resolution_deadline")
+    now = datetime.now(timezone.utc)
+    
+    # Get votes
+    votes = db.get_committee_votes(market_id)
+    
+    # Build committee member list with usernames
+    members = []
+    for agent_id in committee:
+        user = db.get_user(agent_id)
+        members.append(CommitteeMember(
+            agent_id=agent_id,
+            username=user["username"] if user else None,
+            reputation_score=float(user.get("profit_all_time", 0)) if user else None,
+        ))
+    
+    # Build vote detail list
+    vote_details = [
+        CommitteeVoteDetail(
+            agent_id=v["agent_id"],
+            username=v.get("username"),
+            outcome=CommitteeVoteOutcome(v["outcome"]),
+            created_at=v["created_at"],
+        )
+        for v in votes
+    ]
+    
+    # Determine status
+    unanimous_outcome = _check_unanimous(votes, committee) if committee else None
+    deadline_passed = deadline is not None and now >= deadline
+    
+    if market["status"] == MarketStatus.RESOLVED:
+        status = "resolved"
+        resolved_outcome = CommitteeVoteOutcome(market["resolution"].value) if market["resolution"] else None
+    elif unanimous_outcome and unanimous_outcome in ("YES", "NO"):
+        status = "unanimous"
+        resolved_outcome = CommitteeVoteOutcome(unanimous_outcome)
+    elif deadline_passed:
+        status = "deadline_fallback"
+        resolved_outcome = None
+    else:
+        status = "pending"
+        resolved_outcome = None
+    
+    return CommitteeStatusResponse(
+        market_id=market_id,
+        committee=members,
+        votes=vote_details,
+        resolution_deadline=deadline,
+        votes_cast=len(votes),
+        votes_required=len(committee) if committee else COMMITTEE_SIZE,
+        unanimous=(unanimous_outcome is not None),
+        deadline_passed=deadline_passed,
+        status=status,
+        resolved_outcome=resolved_outcome,
     )
 
 

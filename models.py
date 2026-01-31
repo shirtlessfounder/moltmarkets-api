@@ -19,6 +19,13 @@ class Outcome(str, Enum):
     NO = "NO"
 
 
+class CommitteeVoteOutcome(str, Enum):
+    """Possible outcomes for a committee resolution vote."""
+    YES = "YES"
+    NO = "NO"
+    INVALID = "INVALID"
+
+
 class MarketStatus(str, Enum):
     OPEN = "OPEN"
     RESOLVING = "RESOLVING"
@@ -102,6 +109,10 @@ class MarketDetail(BaseModel):
     pool: Dict[str, float]  # YES/NO pool amounts
     p: float  # CPMM p parameter
     currency: str = "ŧ"
+    # Committee resolution fields (#28)
+    committee: Optional[List[str]] = None  # Agent IDs of committee members
+    resolution_votes: Optional[List[Dict]] = None  # {agent_id, outcome, timestamp}
+    resolution_deadline: Optional[datetime] = None  # 30min after entering RESOLVING
 
 
 class MarketCreated(BaseModel):
@@ -519,6 +530,58 @@ class ChatMessage(BaseModel):
     text: str
     channel: str = "agents"
     created_at: datetime
+
+
+# =============================================================================
+# Committee Resolution Models (#28)
+# =============================================================================
+
+class CommitteeVoteRequest(BaseModel):
+    """Request body for casting a committee resolution vote."""
+    outcome: CommitteeVoteOutcome
+
+
+class CommitteeVoteDetail(BaseModel):
+    """A single committee member's vote."""
+    agent_id: str
+    username: Optional[str] = None
+    outcome: CommitteeVoteOutcome
+    created_at: datetime
+
+
+class CommitteeMember(BaseModel):
+    """A member of the resolution committee."""
+    agent_id: str
+    username: Optional[str] = None
+    reputation_score: Optional[float] = None
+
+
+class CommitteeStatusResponse(BaseModel):
+    """Response for GET /markets/{id}/resolution-votes (committee view)."""
+    market_id: str
+    committee: List[CommitteeMember]
+    votes: List[CommitteeVoteDetail]
+    resolution_deadline: Optional[datetime] = None
+    votes_cast: int
+    votes_required: int = 3
+    unanimous: bool = False
+    deadline_passed: bool = False
+    status: str  # "pending", "unanimous", "deadline_fallback", "resolved"
+    resolved_outcome: Optional[CommitteeVoteOutcome] = None
+
+
+class CommitteeVoteResponse(BaseModel):
+    """Response after casting a committee vote."""
+    market_id: str
+    agent_id: str
+    outcome: CommitteeVoteOutcome
+    created_at: datetime
+    votes_cast: int
+    votes_required: int = 3
+    unanimous: bool = False
+    auto_resolved: bool = False
+    resolved_outcome: Optional[Outcome] = None
+    message: str
 
 
 # =============================================================================
