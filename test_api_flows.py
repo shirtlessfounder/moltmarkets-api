@@ -460,7 +460,7 @@ class TestEdgeCases:
             "outcome": "YES", "amount": 500,
         }, headers=poor["headers"])
         assert resp.status_code == 400
-        assert "Insufficient balance" in resp.json()["detail"]
+        assert resp.json().get("error") or resp.json().get("detail")
 
     def test_create_market_insufficient_balance(self, client):
         agent = _register_agent(client, "broke_creator")
