@@ -7,20 +7,48 @@ Uses PostgreSQL for persistence.
 Currency: Points (ŧ) — not real money. All balances and amounts are denominated in points.
 """
 
-import os
+import hashlib
 import json
+import logging
+import os
+import re
+import secrets
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
-from contextlib import asynccontextmanager
 from urllib.parse import urlparse, unquote
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
+import psycopg2
+from psycopg2 import pool
+from psycopg2.extras import RealDictCursor
 
-from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability, Outcome as CpmmOutcome
+from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability
+from models import (
+    MarketCreate, MarketResolve, MarketSummary, MarketDetail, MarketCreated,
+    BetRequest, BetResponse, FeeBreakdown, SellRequest, SellResponse, Position, MarketPositions,
+    UserProfile, UserMe, LeaderboardEntry,
+    ProbabilityPoint, MarketHistory, BetHistoryItem,
+    AgentRegister, AgentRegisteredWithClaim, AgentKeyReset,
+    ClaimPageInfo, ClaimRequest, ClaimResponse, AgentStatus,
+    CommentCreate, Comment, MarketComments,
+    ResolutionResult, ResolutionVote,
+    ChatMessageCreate, ChatMessage,
+    HumanRegister, HumanRegistered,
+    MarketStatus, Outcome,
+    AgentReputationResponse,
+    TradingScoreResponse, ResolutionScoreResponse,
+    CreationScoreResponse, ParticipationScoreResponse,
+    PortfolioPosition, PortfolioSummary, PortfolioResponse, UserBetHistoryItem,
+)
 from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE
+from reputation import compute_reputation
+from resolver import resolve_market as resolver_resolve_market
+
+logger = logging.getLogger(__name__)
 
 
 def set_rate_limit_headers(response: Response, info: dict) -> None:
@@ -50,33 +78,6 @@ def raise_rate_limited(detail: str, info: dict) -> None:
             "X-RateLimit-Reset": str(info.get("reset", "")),
         },
     )
-import secrets
-import hashlib
-import psycopg2
-from psycopg2 import pool
-from psycopg2.extras import RealDictCursor
-
-from models import (
-    MarketCreate, MarketResolve, MarketSummary, MarketDetail, MarketCreated,
-    BetRequest, BetResponse, FeeBreakdown, SellRequest, SellResponse, Position, MarketPositions,
-    UserProfile, UserMe, ErrorResponse, LeaderboardEntry,
-    ProbabilityPoint, MarketHistory, BetHistoryItem,
-    AgentRegister, AgentRegistered, AgentRegisteredWithClaim, AgentKeyReset,
-    ClaimPageInfo, ClaimRequest, ClaimResponse, AgentStatus,
-    CommentCreate, Comment, MarketComments,
-    ResolutionRequest, ResolutionResult, ResolutionVote,
-    ChatMessageCreate, ChatMessage, ChatChannel,
-    HumanRegister, HumanRegistered,
-    MarketStatus, Outcome,
-    AgentReputationResponse,
-    TradingScoreResponse, ResolutionScoreResponse,
-    CreationScoreResponse, ParticipationScoreResponse,
-    PortfolioPosition, PortfolioSummary, PortfolioResponse, UserBetHistoryItem,
-)
-from resolver import resolve_market, get_resolution_summary
-from reputation import compute_reputation
-import random
-import re
 
 
 # =============================================================================
@@ -2426,7 +2427,7 @@ async def request_resolution(market_id: str, user: dict = Depends(require_auth))
         raise HTTPException(status_code=500, detail="Resolution service not configured")
     
     # Run the resolution committee
-    status, outcome, votes = await resolve_market(
+    status, outcome, votes = await resolver_resolve_market(
         market_id=market_id,
         market_title=market["title"],
         market_description=market.get("description", ""),
