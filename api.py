@@ -2402,14 +2402,22 @@ if not ADMIN_SECRET:
 
 
 @app.delete("/admin/users/{username}")
-async def admin_delete_user(username: str, x_admin_secret: str = Header(None)):
+async def admin_delete_user(username: str, request: Request, x_admin_secret: str = Header(None)):
     """
     Delete a user by username (admin only).
     Requires X-Admin-Secret header.
     """
     if not ADMIN_SECRET:
         raise HTTPException(status_code=503, detail="Admin endpoints disabled — ADMIN_SECRET not configured")
-    if x_admin_secret != ADMIN_SECRET:
+    
+    # Rate limit admin endpoints to mitigate brute-force attacks
+    client_ip = request.client.host if request.client else "unknown"
+    allowed, info = rate_limiter.check(f"admin:{client_ip}", max_requests=10, window_seconds=60)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=f"Admin rate limit exceeded. {info['detail']}")
+    
+    # Use constant-time comparison to prevent timing attacks (see #55)
+    if not secrets.compare_digest(x_admin_secret or "", ADMIN_SECRET):
         raise HTTPException(status_code=403, detail="Invalid admin secret")
     
     user = db.get_user_by_username(username)
@@ -2423,14 +2431,22 @@ async def admin_delete_user(username: str, x_admin_secret: str = Header(None)):
 
 
 @app.post("/admin/users/{username}/regenerate-key")
-async def admin_regenerate_api_key(username: str, x_admin_secret: str = Header(None)):
+async def admin_regenerate_api_key(username: str, request: Request, x_admin_secret: str = Header(None)):
     """
     Regenerate API key for a user (admin only).
     Returns the new API key — save it, it won't be shown again!
     """
     if not ADMIN_SECRET:
         raise HTTPException(status_code=503, detail="Admin endpoints disabled — ADMIN_SECRET not configured")
-    if x_admin_secret != ADMIN_SECRET:
+    
+    # Rate limit admin endpoints to mitigate brute-force attacks
+    client_ip = request.client.host if request.client else "unknown"
+    allowed, info = rate_limiter.check(f"admin:{client_ip}", max_requests=10, window_seconds=60)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=f"Admin rate limit exceeded. {info['detail']}")
+    
+    # Use constant-time comparison to prevent timing attacks (see #55)
+    if not secrets.compare_digest(x_admin_secret or "", ADMIN_SECRET):
         raise HTTPException(status_code=403, detail="Invalid admin secret")
     
     user = db.get_user_by_username(username)
