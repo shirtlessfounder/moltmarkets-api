@@ -3,6 +3,7 @@ MoltMarkets Storage — bet CRUD and leaderboard operations.
 """
 
 import warnings
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, List
 
@@ -316,5 +317,67 @@ class BetStorageMixin:
                     resolution_votes=all_resolution_votes,
                     comments_count=comments_count,
                 )
+        finally:
+            self._put_conn(conn)
+
+    def get_sparklines_batch(self, market_ids: List[str], limit: int = 20) -> Dict[str, List[dict]]:
+        """Get sparkline data (last N price points) for multiple markets in one query.
+
+        Returns dict mapping market_id -> list of {timestamp, probability} points.
+        Uses window functions for efficient batch retrieval instead of N+1 queries.
+
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/X
+        """
+        if not market_ids:
+            return {}
+
+        if self._use_memory:
+            # Fallback for in-memory storage
+            result = defaultdict(list)
+            for market_id in market_ids:
+                bets = sorted(
+                    [b for b in self._bets.values() if b["market_id"] == market_id],
+                    key=lambda x: x["created_at"],
+                )
+                # Take last N bets
+                recent = bets[-limit:] if len(bets) > limit else bets
+                for bet in recent:
+                    result[market_id].append({
+                        "timestamp": bet["created_at"],
+                        "probability": bet["probability_after"],
+                    })
+            return dict(result)
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                # Use window function to get last N bets per market efficiently
+                cur.execute("""
+                    WITH ranked_bets AS (
+                        SELECT
+                            market_id,
+                            created_at,
+                            probability_after,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY market_id
+                                ORDER BY created_at DESC
+                            ) AS rn
+                        FROM bets
+                        WHERE market_id = ANY(%s)
+                    )
+                    SELECT market_id, created_at, probability_after
+                    FROM ranked_bets
+                    WHERE rn <= %s
+                    ORDER BY market_id, created_at ASC
+                """, (list(market_ids), limit))
+                rows = cur.fetchall()
+
+                result = defaultdict(list)
+                for row in rows:
+                    result[row["market_id"]].append({
+                        "timestamp": row["created_at"],
+                        "probability": float(row["probability_after"]),
+                    })
+                return dict(result)
         finally:
             self._put_conn(conn)

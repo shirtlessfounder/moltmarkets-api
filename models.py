@@ -130,6 +130,12 @@ class ResolutionStage(str, Enum):
     COMMITTEE_COMPLETE = "committee_complete" # All votes in or deadline expired, no unanimity
 
 
+class SparklinePoint(_SnakeCaseBase):
+    """Single point in a sparkline chart (lightweight version of ProbabilityPoint)."""
+    timestamp: datetime
+    probability: float
+
+
 class MarketSummary(_SnakeCaseBase):
     """Market info for list view."""
     id: str
@@ -146,6 +152,7 @@ class MarketSummary(_SnakeCaseBase):
     committee_size: Optional[int] = None
     votes_cast: Optional[int] = None
     resolution_deadline: Optional[datetime] = None
+    sparkline: Optional[List[SparklinePoint]] = None  # Included when ?include=sparkline
 
 
 class CommitteeVoteDetail(_SnakeCaseBase):
