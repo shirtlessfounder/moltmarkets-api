@@ -5,6 +5,9 @@ MoltMarkets Storage — committee vote methods (issue #107).
 import json
 import uuid
 from datetime import datetime, timezone
+from typing import List
+
+from storage.types import CommitteeVoteDict
 
 
 class CommitteeStorageMixin:
@@ -12,7 +15,7 @@ class CommitteeStorageMixin:
 
     # --- Committee Votes (issue #107) ---
 
-    def update_market_committee(self, market_id: str, committee: list, resolution_deadline: datetime):
+    def update_market_committee(self, market_id: str, committee: List[str], resolution_deadline: datetime) -> None:
         """Set the committee members and resolution deadline for a market."""
         if self._use_memory:
             market = self._markets.get(market_id)
@@ -33,7 +36,7 @@ class CommitteeStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def upsert_committee_vote(self, market_id: str, agent_id: str, outcome: str) -> dict:
+    def upsert_committee_vote(self, market_id: str, agent_id: str, outcome: str) -> CommitteeVoteDict:
         """Insert or update a committee vote (one vote per member per market)."""
         now = datetime.now(timezone.utc)
         vote_id = str(uuid.uuid4())
@@ -43,14 +46,15 @@ class CommitteeStorageMixin:
                 self._committee_votes = {}
             if market_id not in self._committee_votes:
                 self._committee_votes[market_id] = {}
-            self._committee_votes[market_id][agent_id] = {
-                "id": vote_id,
-                "market_id": market_id,
-                "agent_id": agent_id,
-                "outcome": outcome,
-                "created_at": now,
-            }
-            return self._committee_votes[market_id][agent_id]
+            vote = CommitteeVoteDict(
+                id=vote_id,
+                market_id=market_id,
+                agent_id=agent_id,
+                outcome=outcome,
+                created_at=now,
+            )
+            self._committee_votes[market_id][agent_id] = vote
+            return vote
 
         conn = self._get_conn()
         try:
@@ -65,7 +69,13 @@ class CommitteeStorageMixin:
                 row = cur.fetchone()
                 if row:
                     conn.commit()
-                    return dict(row)
+                    return CommitteeVoteDict(
+                        id=row["id"],
+                        market_id=row["market_id"],
+                        agent_id=row["agent_id"],
+                        outcome=row["outcome"],
+                        created_at=row["created_at"],
+                    )
                 # Insert if no existing vote
                 cur.execute("""
                     INSERT INTO committee_votes (id, market_id, agent_id, outcome, created_at)
@@ -74,11 +84,17 @@ class CommitteeStorageMixin:
                 """, (vote_id, market_id, agent_id, outcome, now))
                 row = cur.fetchone()
                 conn.commit()
-                return dict(row)
+                return CommitteeVoteDict(
+                    id=row["id"],
+                    market_id=row["market_id"],
+                    agent_id=row["agent_id"],
+                    outcome=row["outcome"],
+                    created_at=row["created_at"],
+                )
         finally:
             self._put_conn(conn)
 
-    def get_committee_votes(self, market_id: str) -> list:
+    def get_committee_votes(self, market_id: str) -> List[CommitteeVoteDict]:
         """Get all committee votes for a market."""
         if self._use_memory:
             if not hasattr(self, '_committee_votes'):
@@ -95,6 +111,15 @@ class CommitteeStorageMixin:
                     ORDER BY created_at ASC
                 """, (market_id,))
                 rows = cur.fetchall()
-                return [dict(row) for row in rows]
+                return [
+                    CommitteeVoteDict(
+                        id=row["id"],
+                        market_id=row["market_id"],
+                        agent_id=row["agent_id"],
+                        outcome=row["outcome"],
+                        created_at=row["created_at"],
+                    )
+                    for row in rows
+                ]
         finally:
             self._put_conn(conn)

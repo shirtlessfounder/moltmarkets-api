@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Dict, List
 
 from models import MarketStatus, Outcome
+from storage.types import BetDict, BetWithUsernameDict, LeaderboardEntryDict, ReputationDataDict
 
 
 class BetStorageMixin:
@@ -16,22 +17,22 @@ class BetStorageMixin:
 
     def create_bet(self, bet_id: str, market_id: str, user_id: str,
                    outcome: Outcome, amount: float, shares: float,
-                   prob_before: float, prob_after: float) -> dict:
+                   prob_before: float, prob_after: float) -> BetDict:
         avg_price = amount / shares if shares > 0 else 0
 
         if self._use_memory:
-            bet = {
-                "id": bet_id,
-                "market_id": market_id,
-                "user_id": user_id,
-                "outcome": outcome,
-                "amount": amount,
-                "shares": shares,
-                "avg_price": avg_price,
-                "probability_before": prob_before,
-                "probability_after": prob_after,
-                "created_at": datetime.now(timezone.utc),
-            }
+            bet = BetDict(
+                id=bet_id,
+                market_id=market_id,
+                user_id=user_id,
+                outcome=outcome,
+                amount=amount,
+                shares=shares,
+                avg_price=avg_price,
+                probability_before=prob_before,
+                probability_after=prob_after,
+                created_at=datetime.now(timezone.utc),
+            )
             self._bets[bet_id] = bet
             self._users[user_id]["total_bets"] += 1
             return bet
@@ -53,7 +54,7 @@ class BetStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def get_bets_for_market(self, market_id: str) -> List[dict]:
+    def get_bets_for_market(self, market_id: str) -> List[BetDict]:
         """Get all bets for a market."""
         if self._use_memory:
             return [b for b in self._bets.values() if b["market_id"] == market_id]
@@ -67,17 +68,17 @@ class BetStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def get_bets_for_market_with_users(self, market_id: str) -> List[dict]:
+    def get_bets_for_market_with_users(self, market_id: str) -> List[BetWithUsernameDict]:
         """Get all bets for a market with user info in a single JOIN query.
 
         Eliminates N+1: previously get_bets_for_market + N × get_user calls.
         Now: 1 query total.
         """
         if self._use_memory:
-            results = []
+            results: List[BetWithUsernameDict] = []
             for b in self._bets.values():
                 if b["market_id"] == market_id:
-                    bet = dict(b)
+                    bet = BetWithUsernameDict(**b)
                     user = self._users.get(b["user_id"])
                     bet["username"] = user["username"] if user else "unknown"
                     results.append(bet)
@@ -94,16 +95,16 @@ class BetStorageMixin:
                     ORDER BY b.created_at
                 """, (market_id,))
                 rows = cur.fetchall()
-                results = []
+                results: List[BetWithUsernameDict] = []
                 for row in rows:
-                    bet = self._row_to_bet(row)
+                    bet = BetWithUsernameDict(**self._row_to_bet(row))
                     bet["username"] = row.get("username") or "unknown"
                     results.append(bet)
                 return results
         finally:
             self._put_conn(conn)
 
-    def get_bets_for_user(self, user_id: str) -> List[dict]:
+    def get_bets_for_user(self, user_id: str) -> List[BetDict]:
         """Get all bets for a user."""
         if self._use_memory:
             return [b for b in self._bets.values() if b["user_id"] == user_id]
@@ -117,7 +118,7 @@ class BetStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def get_bets_on_markets(self, market_ids: set) -> List[dict]:
+    def get_bets_on_markets(self, market_ids: set) -> List[BetDict]:
         """Get all bets placed on specific markets.
 
         Used by reputation creation-score to count bets on a user's
@@ -144,7 +145,7 @@ class BetStorageMixin:
             self._put_conn(conn)
 
     @property
-    def bets(self) -> Dict[str, dict]:
+    def bets(self) -> Dict[str, BetDict]:
         """Get all bets as dict.
 
         .. deprecated::
@@ -176,7 +177,7 @@ class BetStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def get_leaderboard_data(self) -> List[dict]:
+    def get_leaderboard_data(self) -> List[LeaderboardEntryDict]:
         """Get leaderboard data using aggregate SQL query.
 
         Eliminates N+1: previously loaded ALL users + ALL bets + ALL markets
@@ -185,7 +186,7 @@ class BetStorageMixin:
         """
         if self._use_memory:
             # Fallback: in-memory calculation (same logic, just organized)
-            entries = []
+            entries: List[LeaderboardEntryDict] = []
             for user in self._users.values():
                 if user.get("status") != "claimed":
                     continue
@@ -203,14 +204,14 @@ class BetStorageMixin:
                         if market["resolution"] == bet["outcome"]:
                             wins += 1
                 win_rate = wins / resolved_bets if resolved_bets > 0 else 0.5
-                entries.append({
-                    "user_id": user["id"],
-                    "username": user["username"],
-                    "balance": user["balance"],
-                    "pnl": user["profit_all_time"],
-                    "total_volume": total_volume,
-                    "win_rate": win_rate,
-                })
+                entries.append(LeaderboardEntryDict(
+                    user_id=user["id"],
+                    username=user["username"],
+                    balance=user["balance"],
+                    pnl=user["profit_all_time"],
+                    total_volume=total_volume,
+                    win_rate=win_rate,
+                ))
             entries.sort(key=lambda x: x["pnl"], reverse=True)
             return entries
 
@@ -252,20 +253,20 @@ class BetStorageMixin:
                 """)
                 rows = cur.fetchall()
                 return [
-                    {
-                        "user_id": row["user_id"],
-                        "username": row["username"],
-                        "balance": float(row["balance"]),
-                        "pnl": float(row["pnl"]),
-                        "total_volume": float(row["total_volume"]),
-                        "win_rate": float(row["win_rate"]),
-                    }
+                    LeaderboardEntryDict(
+                        user_id=row["user_id"],
+                        username=row["username"],
+                        balance=float(row["balance"]),
+                        pnl=float(row["pnl"]),
+                        total_volume=float(row["total_volume"]),
+                        win_rate=float(row["win_rate"]),
+                    )
                     for row in rows
                 ]
         finally:
             self._put_conn(conn)
 
-    def get_reputation_data(self, user_id: str) -> dict:
+    def get_reputation_data(self, user_id: str) -> ReputationDataDict:
         """Get all data needed for reputation calculation in minimal queries.
 
         Eliminates N+1: previously looped through ALL markets to fetch
@@ -283,10 +284,10 @@ class BetStorageMixin:
             comments_count = 0
             if hasattr(self, '_comments'):
                 comments_count = sum(1 for c in self._comments.values() if c.get("user_id") == user_id)
-            return {
-                "resolution_votes": all_resolution_votes,
-                "comments_count": comments_count,
-            }
+            return ReputationDataDict(
+                resolution_votes=all_resolution_votes,
+                comments_count=comments_count,
+            )
 
         conn = self._get_conn()
         try:
@@ -311,9 +312,9 @@ class BetStorageMixin:
                 """, (user_id,))
                 comments_count = cur.fetchone()["cnt"]
 
-                return {
-                    "resolution_votes": all_resolution_votes,
-                    "comments_count": comments_count,
-                }
+                return ReputationDataDict(
+                    resolution_votes=all_resolution_votes,
+                    comments_count=comments_count,
+                )
         finally:
             self._put_conn(conn)

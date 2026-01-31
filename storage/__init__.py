@@ -15,6 +15,22 @@ from storage.bets import BetStorageMixin
 from storage.positions import PositionStorageMixin
 from storage.social import SocialStorageMixin
 from storage.committee import CommitteeStorageMixin
+from storage.types import (
+    BetDict,
+    BetWithUsernameDict,
+    ChatMessageDict,
+    CommentDict,
+    CommentWithUsernameDict,
+    CommitteeVoteDict,
+    LeaderboardEntryDict,
+    MarketDict,
+    MarketWithCreatorDict,
+    PoolDict,
+    PositionDict,
+    ReputationDataDict,
+    ResolutionVoteDict,
+    UserDict,
+)
 
 
 class Storage(
@@ -35,4 +51,22 @@ class Storage(
     pass
 
 
-__all__ = ["Storage", "hash_api_key"]
+__all__ = [
+    "Storage",
+    "hash_api_key",
+    # TypedDicts for storage return types (issue #72)
+    "BetDict",
+    "BetWithUsernameDict",
+    "ChatMessageDict",
+    "CommentDict",
+    "CommentWithUsernameDict",
+    "CommitteeVoteDict",
+    "LeaderboardEntryDict",
+    "MarketDict",
+    "MarketWithCreatorDict",
+    "PoolDict",
+    "PositionDict",
+    "ReputationDataDict",
+    "ResolutionVoteDict",
+    "UserDict",
+]

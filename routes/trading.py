@@ -1,5 +1,9 @@
 """
 Trading endpoints — bet, sell, positions, bet history.
+
+Supports dry-run mode via ``X-Dry-Run: true`` header (issue #125).
+Dry-run simulates the trade without executing it — useful for agents
+testing strategies or previewing trade impact.
 """
 
 import logging
