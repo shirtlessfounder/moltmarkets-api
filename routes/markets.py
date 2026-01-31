@@ -23,7 +23,7 @@ from event_bus import event_bus, SSEEvent
 from market_cache import market_cache
 from models import (
     MarketCreate, MarketSummary, MarketDetail, MarketCreated,
-    ProbabilityPoint, MarketHistory,
+    ProbabilityPoint, MarketHistory, SparklinePoint,
     CommitteeVoteDetail, CommitteeOutcome,
     MarketStatus, ResolutionStage,
     PaginationMeta, PaginatedMarketSummary,
@@ -82,27 +82,39 @@ async def list_markets(
     status: Optional[str] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
+    include: Optional[str] = None,
 ):
-    """List markets, filtered by status, with pagination."""
+    """List markets, filtered by status, with pagination.
+    
+    Query params:
+        status: Filter by market status (active, resolved, all)
+        limit: Max results per page
+        offset: Pagination offset
+        include: Comma-separated list of extra data to include.
+                 Supported: "sparkline" - includes last 20 price points per market
+    """
     db = get_db()
     limit, offset = clamp_pagination(limit, offset)
     status_filter = (status or "active").strip().upper()
+    include_sparkline = include and "sparkline" in include.lower()
 
-    client_etag = request.headers.get("if-none-match")
-    cached = market_cache.get(status_filter)
-    if cached and client_etag and client_etag == cached["etag"]:
-        return Response(
-            status_code=304,
-            headers={
-                "ETag": cached["etag"],
-                "Last-Modified": market_cache.last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT"),
-                "Cache-Control": "public, max-age=5",
-            },
-        )
+    # Skip cache when sparklines requested (they need fresh batch query)
+    if not include_sparkline:
+        client_etag = request.headers.get("if-none-match")
+        cached = market_cache.get(status_filter)
+        if cached and client_etag and client_etag == cached["etag"]:
+            return Response(
+                status_code=304,
+                headers={
+                    "ETag": cached["etag"],
+                    "Last-Modified": market_cache.last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+                    "Cache-Control": "public, max-age=5",
+                },
+            )
 
-    if cached:
-        set_cache_headers(response, cached["etag"], market_cache.last_modified)
-        return cached["data"]
+        if cached:
+            set_cache_headers(response, cached["etag"], market_cache.last_modified)
+            return cached["data"]
 
     markets = db.list_markets_with_creators()
 
@@ -121,9 +133,24 @@ async def list_markets(
     total = len(markets)
     page = markets[offset : offset + limit]
 
+    # Batch-fetch sparklines if requested (one query for all markets)
+    sparklines_by_market = {}
+    if include_sparkline and page:
+        market_ids = [m["id"] for m in page]
+        sparklines_by_market = db.get_sparklines_batch(market_ids, limit=20)
+
     result = []
     for m in page:
         resolution_stage, committee_size, votes_cast = _compute_resolution_stage(m)
+        sparkline_data = None
+        if include_sparkline:
+            raw_points = sparklines_by_market.get(m["id"], [])
+            if raw_points:
+                sparkline_data = [
+                    SparklinePoint(timestamp=p["timestamp"], probability=p["probability"])
+                    for p in raw_points
+                ]
+        
         result.append(MarketSummary(
             id=m["id"],
             title=m["title"],
@@ -137,14 +164,19 @@ async def list_markets(
             committee_size=committee_size,
             votes_cast=votes_cast,
             resolution_deadline=m.get("resolution_deadline"),
+            sparkline=sparkline_data,
         ))
 
     paginated = PaginatedMarketSummary(
         data=result,
         pagination=PaginationMeta(limit=limit, offset=offset, total=total),
     )
-    entry = market_cache.set(status_filter, paginated)
-    set_cache_headers(response, entry["etag"], market_cache.last_modified)
+    
+    # Only cache non-sparkline requests (sparklines would bloat cache)
+    if not include_sparkline:
+        entry = market_cache.set(status_filter, paginated)
+        set_cache_headers(response, entry["etag"], market_cache.last_modified)
+    
     return paginated
 
 
