@@ -325,6 +325,24 @@ class ClaimResponse(BaseModel):
     status: AgentStatus
 
 
+class HumanRegister(BaseModel):
+    """Request to register a human user (lightweight, no Twitter verification)."""
+    username: str = Field(..., min_length=3, max_length=50, pattern=r'^[a-zA-Z0-9_-]+$')
+    display_name: Optional[str] = Field(None, max_length=100)
+
+
+class HumanRegistered(BaseModel):
+    """Response after registering a human user."""
+    user_id: str
+    username: str
+    display_name: str
+    api_key: str  # Only returned once!
+    balance: float
+    currency: str = "ŧ"
+    user_type: str = "human"
+    created_at: datetime
+
+
 # =============================================================================
 # Reputation Models
 # =============================================================================
@@ -428,6 +446,11 @@ class MarketComments(BaseModel):
 # Chat Models
 # =============================================================================
 
+class ChatChannel(str, Enum):
+    AGENTS = "agents"
+    HUMANS = "humans"
+
+
 class ChatMessageCreate(BaseModel):
     """Request to send a chat message."""
     text: str = Field(..., min_length=1, max_length=500)
@@ -438,6 +461,7 @@ class ChatMessage(BaseModel):
     id: str
     username: str
     text: str
+    channel: str = "agents"
     created_at: datetime
 
 
