@@ -11,7 +11,6 @@ See: https://github.com/shirtlessfounder/moltmarkets-api/issues/54
 """
 
 import warnings
-import uuid
 from datetime import datetime, timezone, timedelta
 
 import pytest
@@ -20,7 +19,7 @@ import pytest
 import os
 os.environ.pop("DATABASE_URL", None)
 
-from api import Storage, Outcome, MarketStatus
+from api import Storage, Outcome
 
 
 @pytest.fixture
