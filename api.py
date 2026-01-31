@@ -835,9 +835,47 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    def count_users(self) -> int:
+        """Count total users without loading all rows.
+
+        O(1) via COUNT(*) instead of O(N) full-table load.
+        Replaces ``len(db.users)`` in hot paths (health, startup).
+
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/54
+        """
+        if self._use_memory:
+            return len(self._users)
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS cnt FROM users")
+                return cur.fetchone()["cnt"]
+        finally:
+            self._put_conn(conn)
+
     @property
     def users(self) -> Dict[str, dict]:
-        """Get all users (for leaderboard etc.)."""
+        """Get all users as dict.
+
+        .. deprecated::
+            Loads the **entire** users table into memory — O(N) on every call.
+            Use targeted methods instead:
+            - ``count_users()`` for counts
+            - ``get_user(id)`` for single lookups
+            - ``get_user_by_username(name)`` for name lookups
+            - ``get_leaderboard_data()`` for leaderboard
+
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/54
+        """
+        import warnings
+        warnings.warn(
+            "db.users loads the entire users table into memory. "
+            "Use count_users(), get_user(), or get_leaderboard_data() instead. "
+            "See #54: https://github.com/shirtlessfounder/moltmarkets-api/issues/54",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self._use_memory:
             return self._users
         
@@ -912,9 +950,123 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    def count_markets(self) -> int:
+        """Count total markets without loading all rows.
+
+        O(1) via COUNT(*) instead of O(N) full-table load.
+        Replaces ``len(db.markets)`` / ``len(db.list_markets())`` in hot paths.
+
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/54
+        """
+        if self._use_memory:
+            return len(self._markets)
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS cnt FROM markets")
+                return cur.fetchone()["cnt"]
+        finally:
+            self._put_conn(conn)
+
+    def get_markets_by_ids(self, market_ids: set) -> Dict[str, dict]:
+        """Get specific markets by their IDs in a single query.
+
+        Returns a dict of {market_id: market_dict} for only the requested IDs.
+        O(K) where K = len(market_ids), instead of O(N) for the full table.
+
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/54
+        """
+        if not market_ids:
+            return {}
+
+        if self._use_memory:
+            return {mid: self._markets[mid] for mid in market_ids if mid in self._markets}
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM markets WHERE id = ANY(%s)",
+                    (list(market_ids),),
+                )
+                rows = cur.fetchall()
+                return {row["id"]: self._row_to_market(row) for row in rows}
+        finally:
+            self._put_conn(conn)
+
+    def get_markets_by_creator(self, creator_id: str) -> List[dict]:
+        """Get all markets created by a specific user.
+
+        Uses idx_markets_creator index for O(1) lookup.
+
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/54
+        """
+        if self._use_memory:
+            return [m for m in self._markets.values() if m.get("creator_id") == creator_id]
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM markets WHERE creator_id = %s ORDER BY created_at DESC",
+                    (creator_id,),
+                )
+                rows = cur.fetchall()
+                return [self._row_to_market(row) for row in rows]
+        finally:
+            self._put_conn(conn)
+
+    def get_bets_on_markets(self, market_ids: set) -> List[dict]:
+        """Get all bets placed on specific markets.
+
+        Used by reputation creation-score to count bets on a user's
+        created markets without loading the entire bets table.
+
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/54
+        """
+        if not market_ids:
+            return []
+
+        if self._use_memory:
+            return [b for b in self._bets.values() if b.get("market_id") in market_ids]
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM bets WHERE market_id = ANY(%s) ORDER BY created_at",
+                    (list(market_ids),),
+                )
+                rows = cur.fetchall()
+                return [self._row_to_bet(row) for row in rows]
+        finally:
+            self._put_conn(conn)
+
     @property
     def markets(self) -> Dict[str, dict]:
-        """Get all markets as dict."""
+        """Get all markets as dict.
+
+        .. deprecated::
+            Loads the **entire** markets table into memory — O(N) on every call.
+            Use targeted methods instead:
+            - ``count_markets()`` for counts
+            - ``get_market(id)`` for single lookups
+            - ``list_markets()`` for ordered listing
+            - ``get_markets_by_ids(ids)`` for batch lookups
+            - ``get_markets_by_creator(uid)`` for creator filtering
+
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/54
+        """
+        import warnings
+        warnings.warn(
+            "db.markets loads the entire markets table into memory. "
+            "Use count_markets(), get_market(), get_markets_by_ids(), or "
+            "get_markets_by_creator() instead. "
+            "See #54: https://github.com/shirtlessfounder/moltmarkets-api/issues/54",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self._use_memory:
             return self._markets
         
@@ -1127,7 +1279,26 @@ class Storage:
     
     @property
     def bets(self) -> Dict[str, dict]:
-        """Get all bets as dict."""
+        """Get all bets as dict.
+
+        .. deprecated::
+            Loads the **entire** bets table into memory — O(N) on every call.
+            Use targeted methods instead:
+            - ``get_bets_for_market(market_id)`` for market bets
+            - ``get_bets_for_user(user_id)`` for user bets
+            - ``get_bets_on_markets(market_ids)`` for batch market bets
+
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/54
+        """
+        import warnings
+        warnings.warn(
+            "db.bets loads the entire bets table into memory. "
+            "Use get_bets_for_market(), get_bets_for_user(), or "
+            "get_bets_on_markets() instead. "
+            "See #54: https://github.com/shirtlessfounder/moltmarkets-api/issues/54",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self._use_memory:
             return self._bets
         
@@ -1679,8 +1850,8 @@ async def lifespan(app: FastAPI):
     # Startup: seed read-only demo user for unauthenticated access (zero balance)
     if not db.get_user("demo-user"):
         db.create_user("demo-user", "demo_user", balance=0.0)
-    market_count = len(db.list_markets())
-    user_count = len(db.users)
+    market_count = db.count_markets()
+    user_count = db.count_users()
     print(f"MoltMarkets API started with {market_count} markets, {user_count} users")
     yield
     # Shutdown: close the connection pool cleanly
@@ -2752,20 +2923,38 @@ async def get_agent_reputation(agent_id: str):
     if not user:
         raise HTTPException(status_code=404, detail="Agent not found")
     
-    # Gather all data needed for reputation calculation
-    # Optimized: batch queries instead of per-market N+1 loops
+    # Gather all data needed for reputation calculation.
+    # Optimized (#54): targeted queries instead of full-table loads.
+    # Previously: db.markets (ALL markets) + db.bets (ALL bets) → O(N) each.
+    # Now: fetch only the markets/bets relevant to this user → O(K) where K << N.
     user_bets = db.get_bets_for_user(user["id"])
-    markets = db.markets
-    all_bets_dict = db.bets
-    all_bets = list(all_bets_dict.values())
-    
-    # Single batch queries for resolution votes + comment count
-    # (was N+1: looped ALL markets calling get_resolution_votes + get_market_comments each)
+
+    # 1. Collect the market IDs we actually need:
+    #    - Markets the user bet on (for trading score)
+    #    - Markets created by the user (for creation score)
+    bet_market_ids = {b["market_id"] for b in user_bets}
+    user_created_markets = db.get_markets_by_creator(user["id"])
+    created_market_ids = {m["id"] for m in user_created_markets}
+
+    # 2. Batch-fetch resolution votes + comment count
     rep_data = db.get_reputation_data(user["id"])
     all_resolution_votes = rep_data["resolution_votes"]
     comments_count = rep_data["comments_count"]
-    
-    # Compute reputation
+
+    # Include market IDs from this user's resolution votes
+    vote_market_ids = {
+        v.get("market_id") for v in all_resolution_votes
+        if v.get("agent_id") == user["id"] and v.get("market_id")
+    }
+
+    # 3. Fetch only the markets we need (union of all relevant IDs)
+    all_needed_ids = bet_market_ids | created_market_ids | vote_market_ids
+    markets = db.get_markets_by_ids(all_needed_ids)
+
+    # 4. Fetch only bets on user's created markets (for creation score)
+    all_bets = db.get_bets_on_markets(created_market_ids) if created_market_ids else []
+
+    # Compute reputation (pure function — no DB access)
     rep = compute_reputation(
         user=user,
         user_bets=user_bets,
@@ -3470,8 +3659,8 @@ async def health():
             },
         )
 
-    market_count = len(db.list_markets())
-    user_count = len(db.users)
+    market_count = db.count_markets()
+    user_count = db.count_users()
     return {
         "status": "ok",
         "db": "ok",
