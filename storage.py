@@ -296,7 +296,46 @@ class Storage:
                     END $$;
                 """)
                 
+                # Committee votes table (issue #107)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS committee_votes (
+                        id VARCHAR(255) PRIMARY KEY,
+                        market_id VARCHAR(255) REFERENCES markets(id) NOT NULL,
+                        agent_id VARCHAR(255) REFERENCES users(id) NOT NULL,
+                        outcome VARCHAR(10) NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                """)
+                
+                # Committee columns on markets
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='markets' AND column_name='committee') THEN
+                            ALTER TABLE markets ADD COLUMN committee TEXT;
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='markets' AND column_name='resolution_deadline') THEN
+                            ALTER TABLE markets ADD COLUMN resolution_deadline TIMESTAMP WITH TIME ZONE;
+                        END IF;
+                    END $$;
+                """)
+                
+                # Unique constraint for committee votes
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint WHERE conname = 'uq_committee_votes_market_agent'
+                        ) THEN
+                            ALTER TABLE committee_votes
+                                ADD CONSTRAINT uq_committee_votes_market_agent UNIQUE (market_id, agent_id);
+                        END IF;
+                    END $$;
+                """)
+                
                 # Create indexes for common queries
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_committee_votes_market ON committee_votes(market_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_committee_votes_agent ON committee_votes(agent_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_resolution_votes_market ON resolution_votes(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_comments_market ON comments(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at DESC)")
@@ -351,6 +390,14 @@ class Storage:
         """Convert database row to market dict."""
         if not row:
             return None
+        # Parse committee JSON if present
+        committee_raw = row.get("committee")
+        committee = None
+        if committee_raw:
+            try:
+                committee = json.loads(committee_raw) if isinstance(committee_raw, str) else committee_raw
+            except (json.JSONDecodeError, TypeError):
+                committee = None
         return {
             "id": row["id"],
             "title": row["title"],
@@ -365,6 +412,8 @@ class Storage:
             "pool": {"YES": float(row["pool_yes"]), "NO": float(row["pool_no"])},
             "p": float(row["p"]),
             "version": int(row.get("version", 1)),
+            "committee": committee,
+            "resolution_deadline": row.get("resolution_deadline"),
         }
     
     def _row_to_bet(self, row: dict) -> dict:
@@ -1695,8 +1744,97 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    # --- Committee Votes (issue #107) ---
+
+    def update_market_committee(self, market_id: str, committee: list, resolution_deadline: datetime):
+        """Set the committee members and resolution deadline for a market."""
+        if self._use_memory:
+            market = self._markets.get(market_id)
+            if market:
+                market["committee"] = committee
+                market["resolution_deadline"] = resolution_deadline
+            return
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE markets
+                    SET committee = %s, resolution_deadline = %s
+                    WHERE id = %s
+                """, (json.dumps(committee), resolution_deadline, market_id))
+                conn.commit()
+        finally:
+            self._put_conn(conn)
+
+    def upsert_committee_vote(self, market_id: str, agent_id: str, outcome: str) -> dict:
+        """Insert or update a committee vote (one vote per member per market)."""
+        now = datetime.now(timezone.utc)
+        vote_id = str(uuid.uuid4())
+
+        if self._use_memory:
+            if not hasattr(self, '_committee_votes'):
+                self._committee_votes = {}
+            if market_id not in self._committee_votes:
+                self._committee_votes[market_id] = {}
+            self._committee_votes[market_id][agent_id] = {
+                "id": vote_id,
+                "market_id": market_id,
+                "agent_id": agent_id,
+                "outcome": outcome,
+                "created_at": now,
+            }
+            return self._committee_votes[market_id][agent_id]
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                # Try update first
+                cur.execute("""
+                    UPDATE committee_votes
+                    SET outcome = %s, created_at = %s
+                    WHERE market_id = %s AND agent_id = %s
+                    RETURNING *
+                """, (outcome, now, market_id, agent_id))
+                row = cur.fetchone()
+                if row:
+                    conn.commit()
+                    return dict(row)
+                # Insert if no existing vote
+                cur.execute("""
+                    INSERT INTO committee_votes (id, market_id, agent_id, outcome, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING *
+                """, (vote_id, market_id, agent_id, outcome, now))
+                row = cur.fetchone()
+                conn.commit()
+                return dict(row)
+        finally:
+            self._put_conn(conn)
+
+    def get_committee_votes(self, market_id: str) -> list:
+        """Get all committee votes for a market."""
+        if self._use_memory:
+            if not hasattr(self, '_committee_votes'):
+                return []
+            votes = self._committee_votes.get(market_id, {})
+            return list(votes.values())
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT * FROM committee_votes
+                    WHERE market_id = %s
+                    ORDER BY created_at ASC
+                """, (market_id,))
+                rows = cur.fetchall()
+                return [dict(row) for row in rows]
+        finally:
+            self._put_conn(conn)
+
     # --- Utility ---
-    
+
     def _save(self):
         """No-op for PostgreSQL (kept for compatibility)."""
         pass

@@ -63,6 +63,13 @@ class Outcome(str, Enum):
     NO = "NO"
 
 
+class CommitteeOutcome(str, Enum):
+    """Allowed outcomes for committee resolution votes."""
+    YES = "YES"
+    NO = "NO"
+    INVALID = "INVALID"
+
+
 class MarketStatus(str, Enum):
     OPEN = "OPEN"
     RESOLVING = "RESOLVING"
@@ -129,6 +136,13 @@ class MarketSummary(_SnakeCaseBase):
     currency: str = "ŧ"
 
 
+class CommitteeVoteDetail(_SnakeCaseBase):
+    """A single committee member's resolution vote."""
+    agent_id: str
+    outcome: CommitteeOutcome
+    timestamp: datetime
+
+
 class MarketDetail(_SnakeCaseBase):
     """Full market details."""
     id: str
@@ -146,6 +160,10 @@ class MarketDetail(_SnakeCaseBase):
     pool: Dict[str, float]  # YES/NO pool amounts
     p: float  # CPMM p parameter
     currency: str = "ŧ"
+    # Committee resolution fields
+    committee: Optional[List[str]] = None  # List of agent IDs on the committee
+    resolution_votes: Optional[List[CommitteeVoteDetail]] = None  # Committee votes
+    resolution_deadline: Optional[datetime] = None  # 30min after RESOLVING
 
 
 class MarketCreated(_SnakeCaseBase):
@@ -544,6 +562,34 @@ class MarketComments(_SnakeCaseBase):
     market_id: str
     comments: List[Comment]
     total: int
+
+
+# =============================================================================
+# Committee Resolution Models
+# =============================================================================
+
+class CommitteeVoteRequest(_SnakeCaseBase):
+    """Request to cast a committee resolution vote."""
+    outcome: CommitteeOutcome
+
+
+class CommitteeVoteResponse(_SnakeCaseBase):
+    """Response after casting a committee vote."""
+    market_id: str
+    agent_id: str
+    outcome: CommitteeOutcome
+    auto_resolved: bool = False  # True if this vote triggered unanimous resolution
+    resolution_outcome: Optional[Outcome] = None  # Set if auto_resolved
+
+
+class CommitteeStatusResponse(_SnakeCaseBase):
+    """Status of the committee resolution process."""
+    market_id: str
+    committee: List[str]  # Agent IDs
+    votes: List[CommitteeVoteDetail]
+    resolution_deadline: Optional[datetime] = None
+    status: str  # "pending", "unanimous", "mixed", "expired"
+    unanimous_outcome: Optional[Outcome] = None  # Set if all votes agree YES/NO
 
 
 # =============================================================================
