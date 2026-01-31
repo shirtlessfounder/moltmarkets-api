@@ -43,6 +43,8 @@ from models import (
     TradingScoreResponse, ResolutionScoreResponse,
     CreationScoreResponse, ParticipationScoreResponse,
     PortfolioPosition, PortfolioSummary, PortfolioResponse, UserBetHistoryItem,
+    DisputeCreate, DisputeVoteRequest, DisputeVoteResponse,
+    DisputeDetail, DisputeListResponse, DisputeStatus,
 )
 from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE
 from reputation import compute_reputation
@@ -97,6 +99,9 @@ VERIFICATION_WORDS = [
 TRADE_FEE_RATE = 0.02  # 2% total fee
 CREATOR_FEE_SHARE = 0.5  # 50% of fee goes to market creator (1%)
 # Remaining 50% (1%) is burned (not allocated to anyone)
+
+DISPUTE_WINDOW_HOURS = 24              # Hours after resolution that disputes can be filed
+DISPUTE_VOTER_COUNT = 5                # Top N traders (by volume) eligible to vote on disputes
 
 MARKET_CREATION_COST = 100             # Cost in ŧ to create a market (funds the initial liquidity pool)
 CABAL_USERNAMES = {'bicep', 'spotter', 'crabby'}  # Cabal members get reduced cooldown
@@ -483,6 +488,40 @@ class Storage:
                     END $$;
                 """)
                 
+                # Dispute system tables (issue #8)
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='markets' AND column_name='dispute_window_ends') THEN
+                            ALTER TABLE markets ADD COLUMN dispute_window_ends TIMESTAMP WITH TIME ZONE;
+                        END IF;
+                    END $$;
+                """)
+                
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS disputes (
+                        id VARCHAR(255) PRIMARY KEY,
+                        market_id VARCHAR(255) NOT NULL REFERENCES markets(id),
+                        disputor_id VARCHAR(255) NOT NULL REFERENCES users(id),
+                        reason TEXT NOT NULL,
+                        status VARCHAR(50) NOT NULL DEFAULT 'OPEN',
+                        original_resolution VARCHAR(10) NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        resolved_at TIMESTAMP WITH TIME ZONE
+                    )
+                """)
+                
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS dispute_votes (
+                        id VARCHAR(255) PRIMARY KEY,
+                        dispute_id VARCHAR(255) NOT NULL REFERENCES disputes(id),
+                        voter_id VARCHAR(255) NOT NULL REFERENCES users(id),
+                        vote VARCHAR(10) NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        UNIQUE(dispute_id, voter_id)
+                    )
+                """)
+                
                 # Create indexes for common queries
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_resolution_votes_market ON resolution_votes(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_comments_market ON comments(market_id)")
@@ -500,6 +539,12 @@ class Storage:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_closes_at ON markets(closes_at)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users(LOWER(username))")
+                
+                # Dispute indexes
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_disputes_market ON disputes(market_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_disputes_status ON disputes(status)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dispute_votes_dispute ON dispute_votes(dispute_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dispute_votes_voter ON dispute_votes(voter_id)")
                 
                 conn.commit()
                 print("Database tables initialized")
@@ -541,6 +586,7 @@ class Storage:
             "created_at": row["created_at"],
             "resolved_at": row["resolved_at"],
             "resolution": Outcome(row["resolution"].upper()) if row["resolution"] else None,
+            "dispute_window_ends": row.get("dispute_window_ends"),
             "total_volume": float(row["total_volume"]),
             "creator_id": row["creator_id"],
             "pool": {"YES": float(row["pool_yes"]), "NO": float(row["pool_no"])},
@@ -935,6 +981,7 @@ class Storage:
                 "created_at": datetime.now(timezone.utc),
                 "resolved_at": None,
                 "resolution": None,
+                "dispute_window_ends": None,
                 "total_volume": 0.0,
                 "creator_id": creator_id,
                 "pool": pool,
@@ -1001,11 +1048,15 @@ class Storage:
             self._put_conn(conn)
     
     def resolve_market(self, market_id: str, outcome: Outcome):
+        now = datetime.now(timezone.utc)
+        dispute_window_ends = now + timedelta(hours=DISPUTE_WINDOW_HOURS)
+        
         if self._use_memory:
             market = self._markets[market_id]
             market["status"] = MarketStatus.RESOLVED
             market["resolution"] = outcome
-            market["resolved_at"] = datetime.now(timezone.utc)
+            market["resolved_at"] = now
+            market["dispute_window_ends"] = dispute_window_ends
             return
         
         conn = self._get_conn()
@@ -1013,9 +1064,9 @@ class Storage:
             with conn.cursor() as cur:
                 cur.execute("""
                     UPDATE markets 
-                    SET status = %s, resolution = %s, resolved_at = %s
+                    SET status = %s, resolution = %s, resolved_at = %s, dispute_window_ends = %s
                     WHERE id = %s
-                """, (MarketStatus.RESOLVED.value, outcome.value, datetime.now(timezone.utc), market_id))
+                """, (MarketStatus.RESOLVED.value, outcome.value, now, dispute_window_ends, market_id))
                 conn.commit()
         finally:
             self._put_conn(conn)
@@ -1518,6 +1569,264 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    # --- Disputes ---
+    
+    def create_dispute(self, dispute_id: str, market_id: str, disputor_id: str,
+                       reason: str, original_resolution: str) -> dict:
+        """Create a new dispute on a resolved market."""
+        now = datetime.now(timezone.utc)
+        dispute = {
+            "id": dispute_id,
+            "market_id": market_id,
+            "disputor_id": disputor_id,
+            "reason": reason,
+            "status": "OPEN",
+            "original_resolution": original_resolution,
+            "created_at": now,
+            "resolved_at": None,
+        }
+        
+        if self._use_memory:
+            if not hasattr(self, '_disputes'):
+                self._disputes = {}
+            self._disputes[dispute_id] = dispute
+            return dispute
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO disputes (id, market_id, disputor_id, reason, status, original_resolution, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (dispute_id, market_id, disputor_id, reason, "OPEN", original_resolution, now))
+                conn.commit()
+        finally:
+            self._put_conn(conn)
+        return dispute
+    
+    def get_disputes_for_market(self, market_id: str) -> List[dict]:
+        """Get all disputes for a market, ordered by creation time."""
+        if self._use_memory:
+            if not hasattr(self, '_disputes'):
+                return []
+            return sorted(
+                [d for d in self._disputes.values() if d["market_id"] == market_id],
+                key=lambda x: x["created_at"]
+            )
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT d.*, u.username AS disputor_username
+                    FROM disputes d
+                    LEFT JOIN users u ON d.disputor_id = u.id
+                    WHERE d.market_id = %s
+                    ORDER BY d.created_at ASC
+                """, (market_id,))
+                rows = cur.fetchall()
+                return [dict(row) for row in rows]
+        finally:
+            self._put_conn(conn)
+    
+    def get_dispute(self, dispute_id: str) -> Optional[dict]:
+        """Get a single dispute by ID."""
+        if self._use_memory:
+            if not hasattr(self, '_disputes'):
+                return None
+            return self._disputes.get(dispute_id)
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT d.*, u.username AS disputor_username
+                    FROM disputes d
+                    LEFT JOIN users u ON d.disputor_id = u.id
+                    WHERE d.id = %s
+                """, (dispute_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+        finally:
+            self._put_conn(conn)
+    
+    def get_open_dispute_for_market(self, market_id: str) -> Optional[dict]:
+        """Get the currently open dispute for a market (if any)."""
+        if self._use_memory:
+            if not hasattr(self, '_disputes'):
+                return None
+            for d in self._disputes.values():
+                if d["market_id"] == market_id and d["status"] == "OPEN":
+                    return d
+            return None
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT d.*, u.username AS disputor_username
+                    FROM disputes d
+                    LEFT JOIN users u ON d.disputor_id = u.id
+                    WHERE d.market_id = %s AND d.status = 'OPEN'
+                    LIMIT 1
+                """, (market_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+        finally:
+            self._put_conn(conn)
+    
+    def update_dispute_status(self, dispute_id: str, status: str):
+        """Update a dispute's status (OPEN → UPHELD or REJECTED)."""
+        now = datetime.now(timezone.utc)
+        if self._use_memory:
+            if hasattr(self, '_disputes') and dispute_id in self._disputes:
+                self._disputes[dispute_id]["status"] = status
+                self._disputes[dispute_id]["resolved_at"] = now
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE disputes SET status = %s, resolved_at = %s WHERE id = %s
+                """, (status, now, dispute_id))
+                conn.commit()
+        finally:
+            self._put_conn(conn)
+    
+    def create_dispute_vote(self, vote_id: str, dispute_id: str, voter_id: str, vote: str) -> dict:
+        """Record a vote on a dispute."""
+        now = datetime.now(timezone.utc)
+        vote_record = {
+            "id": vote_id,
+            "dispute_id": dispute_id,
+            "voter_id": voter_id,
+            "vote": vote,
+            "created_at": now,
+        }
+        
+        if self._use_memory:
+            if not hasattr(self, '_dispute_votes'):
+                self._dispute_votes = {}
+            self._dispute_votes[vote_id] = vote_record
+            return vote_record
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO dispute_votes (id, dispute_id, voter_id, vote, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (vote_id, dispute_id, voter_id, vote, now))
+                conn.commit()
+        finally:
+            self._put_conn(conn)
+        return vote_record
+    
+    def get_dispute_votes(self, dispute_id: str) -> List[dict]:
+        """Get all votes for a dispute."""
+        if self._use_memory:
+            if not hasattr(self, '_dispute_votes'):
+                return []
+            return [v for v in self._dispute_votes.values() if v["dispute_id"] == dispute_id]
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT dv.*, u.username AS voter_username
+                    FROM dispute_votes dv
+                    LEFT JOIN users u ON dv.voter_id = u.id
+                    WHERE dv.dispute_id = %s
+                    ORDER BY dv.created_at ASC
+                """, (dispute_id,))
+                rows = cur.fetchall()
+                return [dict(row) for row in rows]
+        finally:
+            self._put_conn(conn)
+    
+    def has_user_voted_on_dispute(self, dispute_id: str, voter_id: str) -> bool:
+        """Check if a user has already voted on a dispute."""
+        if self._use_memory:
+            if not hasattr(self, '_dispute_votes'):
+                return False
+            return any(v["dispute_id"] == dispute_id and v["voter_id"] == voter_id
+                       for v in self._dispute_votes.values())
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 1 FROM dispute_votes WHERE dispute_id = %s AND voter_id = %s
+                """, (dispute_id, voter_id))
+                return cur.fetchone() is not None
+        finally:
+            self._put_conn(conn)
+    
+    def get_top_traders_for_market(self, market_id: str, limit: int = 5) -> List[dict]:
+        """Get top N traders by volume on a market (for dispute voting eligibility).
+        
+        Returns list of dicts with user_id, username, and total_volume.
+        """
+        if self._use_memory:
+            volume_by_user = {}
+            for b in self._bets.values():
+                if b["market_id"] == market_id:
+                    uid = b["user_id"]
+                    volume_by_user[uid] = volume_by_user.get(uid, 0) + b["amount"]
+            traders = sorted(volume_by_user.items(), key=lambda x: x[1], reverse=True)[:limit]
+            result = []
+            for uid, vol in traders:
+                user = self._users.get(uid)
+                result.append({
+                    "user_id": uid,
+                    "username": user["username"] if user else "unknown",
+                    "total_volume": vol,
+                })
+            return result
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT b.user_id, u.username, SUM(b.amount) AS total_volume
+                    FROM bets b
+                    LEFT JOIN users u ON b.user_id = u.id
+                    WHERE b.market_id = %s
+                    GROUP BY b.user_id, u.username
+                    ORDER BY total_volume DESC
+                    LIMIT %s
+                """, (market_id, limit))
+                rows = cur.fetchall()
+                return [
+                    {
+                        "user_id": row["user_id"],
+                        "username": row["username"] or "unknown",
+                        "total_volume": float(row["total_volume"]),
+                    }
+                    for row in rows
+                ]
+        finally:
+            self._put_conn(conn)
+    
+    def update_market_resolution(self, market_id: str, outcome: Outcome, status: MarketStatus):
+        """Update a market's resolution and status (used for dispute re-resolution)."""
+        if self._use_memory:
+            market = self._markets[market_id]
+            market["resolution"] = outcome
+            market["status"] = status
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE markets SET resolution = %s, status = %s WHERE id = %s
+                """, (outcome.value, status.value, market_id))
+                conn.commit()
+        finally:
+            self._put_conn(conn)
+    
     # --- Chat Messages ---
     
     def create_chat_message(self, user_id: str, username: str, text: str, channel: str = "agents") -> dict:
@@ -1772,6 +2081,27 @@ app.add_middleware(
 # Payout Helper
 # =============================================================================
 
+def _reverse_payouts(market_id: str, old_outcome: Outcome) -> int:
+    """Reverse payouts from a previous resolution (used when a dispute flips the outcome).
+
+    Claws back payouts from original winners (they got 1ŧ per winning share).
+    Also reverses the profit adjustment so profit_all_time is clean.
+
+    Returns:
+        Number of positions that had payouts reversed.
+    """
+    positions = db.get_market_positions(market_id)
+    reversed_count = 0
+    for pos in positions:
+        winning_shares = pos["yes_shares"] if old_outcome == Outcome.YES else pos["no_shares"]
+        if winning_shares > 0:
+            payout = winning_shares
+            db.update_user_balance(pos["user_id"], -payout)
+            db.update_user_profit(pos["user_id"], -(payout - pos["total_invested"]))
+            reversed_count += 1
+    return reversed_count
+
+
 def _calculate_and_distribute_payouts(market_id: str, outcome: Outcome) -> int:
     """Calculate and distribute payouts to winning position holders for a resolved market.
 
@@ -1834,9 +2164,11 @@ async def list_markets(status: Optional[str] = None):
     if status_filter == "ALL":
         pass  # no filtering
     elif status_filter in ("CLOSED", "RESOLVED"):
-        markets = [m for m in markets if m["status"] == MarketStatus.RESOLVED]
+        markets = [m for m in markets if m["status"] in (MarketStatus.RESOLVED, MarketStatus.RE_RESOLVED)]
     elif status_filter == "RESOLVING":
         markets = [m for m in markets if m["status"] == MarketStatus.RESOLVING]
+    elif status_filter == "DISPUTED":
+        markets = [m for m in markets if m["status"] == MarketStatus.DISPUTED]
     else:
         # Default: only open markets (ACTIVE or OPEN both map here)
         markets = [m for m in markets if m["status"] == MarketStatus.OPEN]
@@ -1883,6 +2215,7 @@ async def get_market(market_id: str):
         created_at=market["created_at"],
         resolved_at=market["resolved_at"],
         resolution=market["resolution"],
+        dispute_window_ends=market.get("dispute_window_ends"),
         total_volume=market["total_volume"],
         creator_id=market["creator_id"],
         creator_username=creator_username,
@@ -2026,6 +2359,7 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
         created_at=market["created_at"],
         resolved_at=market["resolved_at"],
         resolution=market["resolution"],
+        dispute_window_ends=market.get("dispute_window_ends"),
         total_volume=market["total_volume"],
         creator_id=market["creator_id"],
         creator_username=creator_username,
@@ -2582,6 +2916,280 @@ async def get_resolution_votes(market_id: str):
             for v in votes
         ],
         resolved_at=market.get("resolved_at"),
+    )
+
+
+# =============================================================================
+# Dispute Endpoints
+# =============================================================================
+
+def _resolve_dispute(dispute_id: str, market_id: str, original_resolution: Outcome):
+    """Check if all eligible voters have voted and resolve the dispute if so.
+    
+    Called after each vote. If all eligible voters have voted (or enough to
+    determine the outcome), resolves the dispute:
+      - Majority disagrees with original → UPHELD (outcome flips)
+      - Majority agrees with original → REJECTED (original stands)
+    """
+    dispute = db.get_dispute(dispute_id)
+    if not dispute or dispute["status"] != "OPEN":
+        return
+    
+    votes = db.get_dispute_votes(dispute_id)
+    eligible = db.get_top_traders_for_market(market_id, limit=DISPUTE_VOTER_COUNT)
+    eligible_ids = {t["user_id"] for t in eligible}
+    total_eligible = len(eligible_ids)
+    
+    if total_eligible == 0:
+        return
+    
+    # Count votes
+    votes_for_original = sum(1 for v in votes if v["vote"] == original_resolution.value)
+    votes_against_original = sum(1 for v in votes if v["vote"] != original_resolution.value)
+    total_votes = len(votes)
+    
+    majority_threshold = (total_eligible // 2) + 1
+    
+    # Can we determine the outcome?
+    # Either all eligible voted, or one side has an unassailable majority
+    all_voted = total_votes >= total_eligible
+    original_wins = votes_for_original >= majority_threshold
+    challenger_wins = votes_against_original >= majority_threshold
+    
+    if not (all_voted or original_wins or challenger_wins):
+        return  # Not enough votes yet
+    
+    if votes_against_original > votes_for_original:
+        # Dispute UPHELD — flip the outcome
+        db.update_dispute_status(dispute_id, "UPHELD")
+        
+        # Reverse old payouts, apply new ones
+        _reverse_payouts(market_id, original_resolution)
+        new_outcome = Outcome.NO if original_resolution == Outcome.YES else Outcome.YES
+        db.update_market_resolution(market_id, new_outcome, MarketStatus.RE_RESOLVED)
+        _calculate_and_distribute_payouts(market_id, new_outcome)
+    else:
+        # Dispute REJECTED — original resolution stands
+        db.update_dispute_status(dispute_id, "REJECTED")
+        db.update_market_status(market_id, MarketStatus.RESOLVED)
+
+
+@app.post("/markets/{market_id}/dispute", response_model=DisputeDetail, tags=["markets"])
+async def file_dispute(market_id: str, req: DisputeCreate, user: dict = Depends(require_auth)):
+    """File a dispute on a resolved market.
+    
+    Any trader who has a position on the market can dispute within 24 hours
+    of resolution. This triggers a re-resolution vote by the top traders
+    (by volume) on the market.
+    
+    One dispute round only — no appeals after re-resolution.
+    """
+    _validate_uuid(market_id, "market_id")
+    market = db.get_market(market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    
+    # Must be resolved (not already disputed/re-resolved)
+    if market["status"] not in (MarketStatus.RESOLVED,):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can only dispute RESOLVED markets. Current status: {market['status'].value}"
+        )
+    
+    # Check dispute window
+    now = datetime.now(timezone.utc)
+    dispute_window_ends = market.get("dispute_window_ends")
+    if dispute_window_ends:
+        if isinstance(dispute_window_ends, str):
+            dispute_window_ends = datetime.fromisoformat(dispute_window_ends.replace('Z', '+00:00'))
+        if now > dispute_window_ends:
+            raise HTTPException(
+                status_code=400,
+                detail="Dispute window has expired (24 hours after resolution)"
+            )
+    
+    # Must have a position (must be a trader on this market)
+    position = db.get_position(market_id, user["id"])
+    if not position or (position["yes_shares"] <= 0 and position["no_shares"] <= 0):
+        raise HTTPException(
+            status_code=403,
+            detail="Only traders with a position on this market can file disputes"
+        )
+    
+    # Check no open dispute already exists
+    existing = db.get_open_dispute_for_market(market_id)
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail="There is already an open dispute on this market"
+        )
+    
+    # Check no previous dispute was already resolved (one round only)
+    all_disputes = db.get_disputes_for_market(market_id)
+    if any(d["status"] in ("UPHELD", "REJECTED") for d in all_disputes):
+        raise HTTPException(
+            status_code=400,
+            detail="This market has already been through a dispute round. No appeals allowed."
+        )
+    
+    # Get eligible voters (top N traders by volume)
+    eligible = db.get_top_traders_for_market(market_id, limit=DISPUTE_VOTER_COUNT)
+    if len(eligible) < 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Not enough traders on this market to form a dispute committee"
+        )
+    
+    # Create the dispute
+    dispute_id = str(uuid.uuid4())
+    original_resolution = market["resolution"].value
+    dispute = db.create_dispute(
+        dispute_id=dispute_id,
+        market_id=market_id,
+        disputor_id=user["id"],
+        reason=req.reason,
+        original_resolution=original_resolution,
+    )
+    
+    # Transition market to DISPUTED
+    db.update_market_status(market_id, MarketStatus.DISPUTED)
+    
+    return DisputeDetail(
+        id=dispute["id"],
+        market_id=market_id,
+        disputor_id=user["id"],
+        disputor_username=user["username"],
+        reason=req.reason,
+        status=DisputeStatus.OPEN,
+        original_resolution=Outcome(original_resolution),
+        created_at=dispute["created_at"],
+        eligible_voters=len(eligible),
+        votes_for_original=0,
+        votes_against_original=0,
+    )
+
+
+@app.post("/markets/{market_id}/disputes/{dispute_id}/vote", response_model=DisputeVoteResponse, tags=["markets"])
+async def vote_on_dispute(market_id: str, dispute_id: str, req: DisputeVoteRequest, user: dict = Depends(require_auth)):
+    """Vote on an open dispute.
+    
+    Only the top N traders (by volume) on the market are eligible to vote.
+    Each eligible voter gets one vote — what they believe the correct outcome is.
+    
+    Once all eligible voters have voted (or a majority is reached),
+    the dispute is automatically resolved.
+    """
+    _validate_uuid(market_id, "market_id")
+    _validate_uuid(dispute_id, "dispute_id")
+    
+    market = db.get_market(market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    
+    dispute = db.get_dispute(dispute_id)
+    if not dispute:
+        raise HTTPException(status_code=404, detail="Dispute not found")
+    
+    if dispute["market_id"] != market_id:
+        raise HTTPException(status_code=400, detail="Dispute does not belong to this market")
+    
+    if dispute["status"] != "OPEN":
+        raise HTTPException(status_code=400, detail=f"Dispute is already {dispute['status']}")
+    
+    # Check voter eligibility (must be top N trader by volume)
+    eligible = db.get_top_traders_for_market(market_id, limit=DISPUTE_VOTER_COUNT)
+    eligible_ids = {t["user_id"] for t in eligible}
+    
+    if user["id"] not in eligible_ids:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the top traders (by volume) on this market are eligible to vote on disputes"
+        )
+    
+    # Check if already voted
+    if db.has_user_voted_on_dispute(dispute_id, user["id"]):
+        raise HTTPException(status_code=400, detail="You have already voted on this dispute")
+    
+    # Record vote
+    vote_id = str(uuid.uuid4())
+    vote_record = db.create_dispute_vote(vote_id, dispute_id, user["id"], req.vote.value)
+    
+    # Try to resolve the dispute (will no-op if not enough votes yet)
+    original_resolution = Outcome(dispute["original_resolution"])
+    _resolve_dispute(dispute_id, market_id, original_resolution)
+    
+    return DisputeVoteResponse(
+        voter_id=user["id"],
+        voter_username=user["username"],
+        vote=req.vote,
+        created_at=vote_record["created_at"],
+    )
+
+
+@app.get("/markets/{market_id}/disputes", response_model=DisputeListResponse, tags=["markets"])
+async def list_disputes(market_id: str):
+    """List all disputes for a market and their status.
+    
+    Includes vote tallies and eligible voter count for each dispute.
+    """
+    _validate_uuid(market_id, "market_id")
+    market = db.get_market(market_id)
+    if not market:
+        raise HTTPException(status_code=404, detail="Market not found")
+    
+    raw_disputes = db.get_disputes_for_market(market_id)
+    eligible = db.get_top_traders_for_market(market_id, limit=DISPUTE_VOTER_COUNT)
+    
+    disputes = []
+    for d in raw_disputes:
+        votes = db.get_dispute_votes(d["id"])
+        original_res = d["original_resolution"]
+        
+        votes_for = sum(1 for v in votes if v["vote"] == original_res)
+        votes_against = sum(1 for v in votes if v["vote"] != original_res)
+        
+        # Determine final resolution for completed disputes
+        final_resolution = None
+        if d["status"] == "UPHELD":
+            final_resolution = Outcome.NO if original_res == "YES" else Outcome.YES
+        elif d["status"] == "REJECTED":
+            final_resolution = Outcome(original_res)
+        
+        # Get disputor username
+        disputor_username = d.get("disputor_username")
+        if not disputor_username:
+            disputor = db.get_user(d["disputor_id"])
+            disputor_username = disputor["username"] if disputor else None
+        
+        disputes.append(DisputeDetail(
+            id=d["id"],
+            market_id=d["market_id"],
+            disputor_id=d["disputor_id"],
+            disputor_username=disputor_username,
+            reason=d["reason"],
+            status=DisputeStatus(d["status"]),
+            original_resolution=Outcome(d["original_resolution"]),
+            final_resolution=final_resolution,
+            created_at=d["created_at"],
+            resolved_at=d.get("resolved_at"),
+            votes=[
+                DisputeVoteResponse(
+                    voter_id=v["voter_id"],
+                    voter_username=v.get("voter_username", "unknown"),
+                    vote=Outcome(v["vote"]),
+                    created_at=v["created_at"],
+                )
+                for v in votes
+            ],
+            eligible_voters=len(eligible),
+            votes_for_original=votes_for,
+            votes_against_original=votes_against,
+        ))
+    
+    return DisputeListResponse(
+        market_id=market_id,
+        disputes=disputes,
+        dispute_window_ends=market.get("dispute_window_ends"),
     )
 
 
@@ -3356,6 +3964,9 @@ curl -X POST https://moltmarkets-api-production.up.railway.app/markets/MARKET_ID
 | GET | `/markets/{{id}}/history` | No | Price history |
 | GET | `/markets/{{id}}/comments` | No | List comments |
 | POST | `/markets/{{id}}/comments` | Yes | Add a comment |
+| POST | `/markets/{{id}}/dispute` | Yes | File a dispute (within 24h of resolution) |
+| POST | `/markets/{{id}}/disputes/{{did}}/vote` | Yes | Vote on an open dispute (top traders only) |
+| GET | `/markets/{{id}}/disputes` | No | List disputes and their status |
 
 ### Trading
 

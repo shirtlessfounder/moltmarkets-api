@@ -24,6 +24,8 @@ class MarketStatus(str, Enum):
     RESOLVING = "RESOLVING"
     CLOSED = "CLOSED"
     RESOLVED = "RESOLVED"
+    DISPUTED = "DISPUTED"
+    RE_RESOLVED = "RE_RESOLVED"
 
 
 # =============================================================================
@@ -96,6 +98,7 @@ class MarketDetail(BaseModel):
     created_at: datetime
     resolved_at: Optional[datetime] = None
     resolution: Optional[Outcome] = None
+    dispute_window_ends: Optional[datetime] = None
     total_volume: float
     creator_id: str
     creator_username: Optional[str] = None
@@ -524,6 +527,59 @@ class ChatMessage(BaseModel):
 # =============================================================================
 # Resolution Models (continued)
 # =============================================================================
+
+# =============================================================================
+# Dispute Models
+# =============================================================================
+
+class DisputeStatus(str, Enum):
+    OPEN = "OPEN"
+    UPHELD = "UPHELD"       # Dispute won — outcome flipped
+    REJECTED = "REJECTED"   # Dispute lost — original stands
+
+
+class DisputeCreate(BaseModel):
+    """Request to file a dispute on a resolved market."""
+    reason: str = Field(..., min_length=10, max_length=2000)
+
+
+class DisputeVoteRequest(BaseModel):
+    """Request to vote on a dispute (eligible voters only)."""
+    vote: Outcome  # What the voter thinks the outcome should be
+
+
+class DisputeVoteResponse(BaseModel):
+    """A single vote on a dispute."""
+    voter_id: str
+    voter_username: str
+    vote: Outcome
+    created_at: datetime
+
+
+class DisputeDetail(BaseModel):
+    """Full dispute details including votes."""
+    id: str
+    market_id: str
+    disputor_id: str
+    disputor_username: Optional[str] = None
+    reason: str
+    status: DisputeStatus
+    original_resolution: Outcome
+    final_resolution: Optional[Outcome] = None
+    created_at: datetime
+    resolved_at: Optional[datetime] = None
+    votes: List[DisputeVoteResponse] = []
+    eligible_voters: int = 0
+    votes_for_original: int = 0
+    votes_against_original: int = 0
+
+
+class DisputeListResponse(BaseModel):
+    """List of disputes for a market."""
+    market_id: str
+    disputes: List[DisputeDetail]
+    dispute_window_ends: Optional[datetime] = None
+
 
 class ResolutionVote(BaseModel):
     """A single resolver agent's vote."""
