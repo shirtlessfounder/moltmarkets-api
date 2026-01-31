@@ -1,9 +1,7 @@
 """Tests for the market list cache (issue #45)."""
 
 import time
-from datetime import datetime, timezone
 
-import pytest
 
 from market_cache import MarketListCache
 

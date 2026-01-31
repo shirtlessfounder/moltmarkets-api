@@ -46,7 +46,7 @@ from models import (
     PortfolioPosition, PortfolioSummary, PortfolioResponse, UserBetHistoryItem,
 )
 from market_cache import market_cache
-from idempotency import IdempotencyMiddleware, idempotency_store, IDEMPOTENCY_HEADER
+from idempotency import IdempotencyMiddleware, idempotency_store
 from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT, MAX_CHAT_MESSAGES_PER_MINUTE
 from reputation import compute_reputation
 from resolver import resolve_market as resolver_resolve_market

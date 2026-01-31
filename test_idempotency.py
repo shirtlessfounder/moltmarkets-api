@@ -125,7 +125,6 @@ def client():
         import api as api_module
         importlib.reload(api_module)
         # Re-apply the idempotency middleware after reload
-        from idempotency import IdempotencyMiddleware
         # TestClient wraps the existing app which already has middleware
         yield TestClient(api_module.app)
 
@@ -223,8 +222,6 @@ class TestIdempotencyMiddlewareIntegration:
         })
         assert r.status_code == 200
         api_key_2 = r.json()["api_key"]
-
-        shared_key = "shared-idempotency-key"
 
         # User 1 checks /me
         r1 = client.get("/me", headers={
