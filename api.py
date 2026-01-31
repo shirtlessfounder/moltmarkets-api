@@ -1410,6 +1410,42 @@ app.add_middleware(
 
 
 # =============================================================================
+# Payout Helper
+# =============================================================================
+
+def _calculate_and_distribute_payouts(market_id: str, outcome: Outcome) -> int:
+    """Calculate and distribute payouts to winning position holders for a resolved market.
+
+    Each winning share is worth exactly 1ŧ. Winners receive their share count as
+    payout, and their profit is updated as (payout - total_invested).
+
+    Args:
+        market_id: The ID of the market being resolved.
+        outcome: The winning outcome (Outcome.YES or Outcome.NO).
+
+    Returns:
+        The number of positions that received a payout.
+
+    Edge cases:
+        - No positions on the market: returns 0, no DB writes.
+        - All bets on the losing side: every position has 0 winning shares,
+          returns 0, profit is updated as negative (loss of total_invested).
+        - All bets on the winning side: everyone gets paid, but net profit
+          depends on their entry price vs share value.
+    """
+    positions = db.get_market_positions(market_id)
+    paid = 0
+    for pos in positions:
+        winning_shares = pos["yes_shares"] if outcome == Outcome.YES else pos["no_shares"]
+        if winning_shares > 0:
+            payout = winning_shares  # Each winning share pays 1ŧ
+            db.update_user_balance(pos["user_id"], payout)
+            db.update_user_profit(pos["user_id"], payout - pos["total_invested"])
+            paid += 1
+    return paid
+
+
+# =============================================================================
 # Market Endpoints
 # =============================================================================
 
@@ -1614,14 +1650,7 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
         market["status"] = MarketStatus.RESOLVING
     
     db.resolve_market(market_id, req.outcome)
-    
-    # Payout positions
-    for pos in db.get_market_positions(market_id):
-        winning_shares = pos["yes_shares"] if req.outcome == Outcome.YES else pos["no_shares"]
-        if winning_shares > 0:
-            payout = winning_shares  # Each winning share pays 1ŧ
-            db.update_user_balance(pos["user_id"], payout)
-            db.update_user_profit(pos["user_id"], payout - pos["total_invested"])
+    _calculate_and_distribute_payouts(market_id, req.outcome)
     
     market = db.get_market(market_id)
     
@@ -2093,14 +2122,7 @@ async def request_resolution(market_id: str, user: dict = Depends(require_auth))
     if status == "resolved" and outcome:
         outcome_enum = Outcome.YES if outcome == "YES" else Outcome.NO
         db.resolve_market(market_id, outcome_enum)
-        
-        # Payout positions
-        for pos in db.get_market_positions(market_id):
-            winning_shares = pos["yes_shares"] if outcome == "YES" else pos["no_shares"]
-            if winning_shares > 0:
-                payout = winning_shares
-                db.update_user_balance(pos["user_id"], payout)
-                db.update_user_profit(pos["user_id"], payout - pos["total_invested"])
+        _calculate_and_distribute_payouts(market_id, outcome_enum)
         
         resolved_at = datetime.now(timezone.utc)
     
