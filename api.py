@@ -38,7 +38,7 @@ from models import (
     PaginationMeta, PaginatedMarketSummary, PaginatedLeaderboardEntry,
     PaginatedChatMessage, PaginatedBetHistoryItem,
 )
-from auth import init_db, get_current_user, require_auth, generate_api_key, ADMIN_SECRET, verify_admin_secret
+from auth import init_db, require_auth, generate_api_key, ADMIN_SECRET
 from market_cache import market_cache
 from middleware import set_rate_limit_headers, raise_rate_limited, configure_middleware
 from idempotency import idempotency_store
