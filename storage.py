@@ -1062,6 +1062,34 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    def transition_expired_markets(self) -> int:
+        """Batch-transition all OPEN markets past closes_at → RESOLVING.
+
+        Returns the number of rows updated.  Uses a single UPDATE so the
+        cost is O(1) DB round-trips regardless of how many markets expire.
+        """
+        now = datetime.now(timezone.utc)
+        if self._use_memory:
+            count = 0
+            for m in self._markets.values():
+                if m["status"] == MarketStatus.OPEN and m["closes_at"] <= now:
+                    m["status"] = MarketStatus.RESOLVING
+                    count += 1
+            return count
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE markets SET status = %s "
+                    "WHERE status = %s AND closes_at <= %s",
+                    (MarketStatus.RESOLVING.value, MarketStatus.OPEN.value, now),
+                )
+                conn.commit()
+                return cur.rowcount
+        finally:
+            self._put_conn(conn)
+
     def resolve_market(self, market_id: str, outcome: Outcome):
         if self._use_memory:
             market = self._markets[market_id]

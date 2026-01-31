@@ -15,7 +15,8 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Depends, Header, Request, Response
+
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Depends, Header, Request, Response
 from errors import error_response, APIError, ErrorCode, api_error_handler, http_exception_handler, unhandled_exception_handler
 import httpx
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability
@@ -334,6 +335,40 @@ def _calculate_and_distribute_payouts(market_id: str, outcome: Outcome) -> int:
 
 
 # =============================================================================
+# Market Transition Helpers (see #67)
+# =============================================================================
+
+def _maybe_transition_market(market: dict, market_id: str) -> None:
+    """Transition a single OPEN market to RESOLVING if past closes_at.
+
+    Lightweight check used by single-market endpoints (detail, bet, sell,
+    resolve).  Mutates *market* in place so callers see the updated status
+    without a re-fetch.
+    """
+    if market["status"] != MarketStatus.OPEN:
+        return
+    now = datetime.now(timezone.utc)
+    if market["closes_at"] <= now:
+        db.update_market_status(market_id, MarketStatus.RESOLVING)
+        market["status"] = MarketStatus.RESOLVING
+
+
+def _bg_transition_expired_markets() -> None:
+    """Background callback: batch-transition expired markets.
+
+    Called via FastAPI BackgroundTasks so the response is already on the
+    wire when this runs.  Errors are logged, never propagated to the
+    caller.
+    """
+    try:
+        count = db.transition_expired_markets()
+        if count:
+            logger.info("Background transition: %d market(s) moved OPEN → RESOLVING", count)
+    except Exception:
+        logger.exception("Background market transition failed")
+
+
+# =============================================================================
 # Market Endpoints
 # =============================================================================
 
@@ -344,6 +379,7 @@ async def list_markets(
     status: Optional[str] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
+    bg: BackgroundTasks = BackgroundTasks(),
 ):
     """List markets, filtered by status, with pagination.
 
@@ -389,12 +425,16 @@ async def list_markets(
     # Single JOIN query: markets + creator usernames (was N+1: 1 + N get_user calls)
     markets = db.list_markets_with_creators()
 
-    # Auto-transition: move OPEN markets past closes_at to RESOLVING
+    # Schedule batch transition as a background task so the response isn't
+    # blocked by N individual UPDATE statements (fixes #67).
+    bg.add_task(_bg_transition_expired_markets)
+
+    # Present accurate status to THIS caller: mark expired markets in the
+    # in-memory list without hitting the DB per-row.
     now = datetime.now(timezone.utc)
     transitioned = False
     for m in markets:
         if m["status"] == MarketStatus.OPEN and m["closes_at"] <= now:
-            db.update_market_status(m["id"], MarketStatus.RESOLVING)
             m["status"] = MarketStatus.RESOLVING
             transitioned = True
 
@@ -456,11 +496,7 @@ async def get_market(market_id: str):
     if not market:
         return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
-    # Auto-transition: OPEN → RESOLVING when closes_at has passed
-    now = datetime.now(timezone.utc)
-    if market["status"] == MarketStatus.OPEN and market["closes_at"] <= now:
-        db.update_market_status(market_id, MarketStatus.RESOLVING)
-        market["status"] = MarketStatus.RESOLVING
+    _maybe_transition_market(market, market_id)
     
     # Look up creator username
     creator = db.get_user(market["creator_id"]) if market["creator_id"] else None
@@ -608,11 +644,7 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
     if market["status"] == MarketStatus.RESOLVED:
         return error_response(400, "Market already resolved", ErrorCode.ALREADY_RESOLVED)
     
-    # Auto-transition OPEN → RESOLVING if closes_at has passed
-    now = datetime.now(timezone.utc)
-    if market["status"] == MarketStatus.OPEN and market["closes_at"] <= now:
-        db.update_market_status(market_id, MarketStatus.RESOLVING)
-        market["status"] = MarketStatus.RESOLVING
+    _maybe_transition_market(market, market_id)
     
     db.resolve_market(market_id, req.outcome)
     _calculate_and_distribute_payouts(market_id, req.outcome)
@@ -705,16 +737,13 @@ async def place_bet(market_id: str, req: BetRequest, response: Response, user: d
     if not market:
         return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
-    # Auto-transition: OPEN → RESOLVING when closes_at has passed
-    now = datetime.now(timezone.utc)
-    if market["status"] == MarketStatus.OPEN and market["closes_at"] <= now:
-        db.update_market_status(market_id, MarketStatus.RESOLVING)
-        market["status"] = MarketStatus.RESOLVING
+    _maybe_transition_market(market, market_id)
     
     if market["status"] != MarketStatus.OPEN:
         status_msg = "Market is resolving (closed, awaiting resolution)" if market["status"] == MarketStatus.RESOLVING else "Market is not open for trading"
         return error_response(400, status_msg, ErrorCode.MARKET_CLOSED)
     
+    now = datetime.now(timezone.utc)
     if market["closes_at"] <= now:
         return error_response(400, "Market has closed", ErrorCode.MARKET_CLOSED)
     
@@ -843,16 +872,13 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
     if not market:
         return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
     
-    # Auto-transition: OPEN → RESOLVING when closes_at has passed
-    now = datetime.now(timezone.utc)
-    if market["status"] == MarketStatus.OPEN and market["closes_at"] <= now:
-        db.update_market_status(market_id, MarketStatus.RESOLVING)
-        market["status"] = MarketStatus.RESOLVING
+    _maybe_transition_market(market, market_id)
     
     if market["status"] != MarketStatus.OPEN:
         status_msg = "Market is resolving (closed, awaiting resolution)" if market["status"] == MarketStatus.RESOLVING else "Market is not open for trading"
         return error_response(400, status_msg, ErrorCode.MARKET_CLOSED)
     
+    now = datetime.now(timezone.utc)
     if market["closes_at"] <= now:
         return error_response(400, "Market has closed", ErrorCode.MARKET_CLOSED)
     
@@ -1163,11 +1189,7 @@ async def request_resolution(market_id: str, user: dict = Depends(require_auth))
     if market["status"] == MarketStatus.RESOLVED:
         return error_response(400, "Market already resolved", ErrorCode.ALREADY_RESOLVED)
     
-    # Auto-transition OPEN → RESOLVING if closes_at has passed
-    now = datetime.now(timezone.utc)
-    if market["status"] == MarketStatus.OPEN and market["closes_at"] <= now:
-        db.update_market_status(market_id, MarketStatus.RESOLVING)
-        market["status"] = MarketStatus.RESOLVING
+    _maybe_transition_market(market, market_id)
     
     # Get API keys from environment
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
@@ -1658,6 +1680,32 @@ async def admin_delete_user(username: str, request: Request, x_admin_secret: str
     db.delete_user(user["id"])
     
     return {"deleted": True, "username": username, "user_id": user["id"]}
+
+
+@app.post("/admin/transition-markets", tags=["admin"])
+async def admin_transition_markets(request: Request, x_admin_secret: str = Header(None)):
+    """Batch-transition all OPEN markets past closes_at to RESOLVING.
+
+    Designed to be called by an external cron (e.g. every minute) so that
+    market transitions happen out-of-band instead of blocking user-facing
+    GET /markets requests.  See issue #67.
+
+    Requires X-Admin-Secret header.
+    """
+    if not ADMIN_SECRET:
+        raise HTTPException(status_code=503, detail="Admin endpoints disabled — ADMIN_SECRET not configured")
+
+    client_ip = request.client.host if request.client else "unknown"
+    allowed, info = rate_limiter.check(f"admin:{client_ip}", max_requests=10, window_seconds=60)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=f"Admin rate limit exceeded. {info['detail']}")
+
+    if not secrets.compare_digest(x_admin_secret or "", ADMIN_SECRET):
+        raise HTTPException(status_code=403, detail="Invalid admin secret")
+
+    count = db.transition_expired_markets()
+    market_cache.invalidate()
+    return {"transitioned": count}
 
 
 @app.post("/admin/users/{username}/regenerate-key", tags=["admin"])
