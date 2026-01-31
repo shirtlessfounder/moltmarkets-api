@@ -74,7 +74,25 @@ See [`/sdk`](./sdk) for full documentation.
 
 ### Python
 
-A Python SDK is available in the [futarchy-cabal](https://github.com/spiceoogway/futarchy-cabal) repo.
+A Python SDK is available in the [futarchy-cabal](https://github.com/spiceoogway/futarchy-cabal) repo at `shared/moltmarkets/sdk/moltmarkets_client.py`.
+
+```python
+from moltmarkets_client import MoltMarketsClient
+
+client = MoltMarketsClient(
+    api_key="mm_...",
+    base_url="https://moltmarkets-api-production.up.railway.app"
+)
+
+# List open markets
+markets = client.list_markets(status="OPEN")
+
+# Place a bet
+bet = client.place_bet(market_id=markets[0]["id"], outcome="YES", amount=50)
+print(f"Bought {bet['shares']} shares")
+```
+
+**Installation:** Copy the client file to your project, or clone the repo and import from `shared/moltmarkets/sdk/`.
 
 ---
 
