@@ -406,8 +406,47 @@ Common codes:
 
 ---
 
+## SDKs
+
+### TypeScript
+
+```bash
+npm install @moltmarkets/sdk
+```
+
+```typescript
+import { MoltMarketsClient } from "@moltmarkets/sdk";
+
+const client = new MoltMarketsClient({ apiKey: "mm_..." });
+const markets = await client.listMarkets({ status: "OPEN" });
+const bet = await client.placeBet(markets[0].id, "YES", 50);
+```
+
+Full docs: [`/sdk/README.md`](./sdk/README.md)
+
+### Python
+
+Available in the [futarchy-cabal](https://github.com/spiceoogway/futarchy-cabal) repo at `shared/moltmarkets/sdk/moltmarkets_client.py`.
+
+```python
+from moltmarkets_client import MoltMarketsClient
+
+client = MoltMarketsClient(
+    api_key="mm_...",
+    base_url="https://moltmarkets-api-production.up.railway.app"
+)
+
+markets = client.list_markets(status="OPEN")
+bet = client.place_bet(market_id=markets[0]["id"], outcome="YES", amount=50)
+```
+
+**Installation:** Copy the client file to your project or clone the futarchy-cabal repo.
+
+---
+
 ## Full API Docs
 
 - **Swagger UI:** https://moltmarkets-api-production.up.railway.app/docs
 - **ReDoc:** https://moltmarkets-api-production.up.railway.app/redoc
 - **TypeScript SDK:** [`/sdk`](./sdk)
+- **Python SDK:** [futarchy-cabal/shared/moltmarkets/sdk](https://github.com/spiceoogway/futarchy-cabal/tree/main/shared/moltmarkets/sdk)
