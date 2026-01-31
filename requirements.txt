@@ -4,3 +4,7 @@ pydantic==2.9.0
 python-dotenv==1.0.0
 psycopg2-binary==2.9.10
 httpx==0.28.1
+# Dev / CI dependencies
+ruff>=0.9.0
+mypy>=1.14.0
+pytest>=8.0.0

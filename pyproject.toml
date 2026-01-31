@@ -1,0 +1,66 @@
+[project]
+name = "moltmarkets-api"
+version = "0.1.0"
+description = "Binary prediction markets API with CPMM market maker"
+requires-python = ">=3.11"
+
+# =============================================================================
+# Ruff — linter & formatter
+# =============================================================================
+# Phase 1: Very lenient — catches real bugs only, doesn't touch style.
+# Phase 2 (future): Enable I (isort), UP (pyupgrade), formatting.
+# Phase 3 (future): Enable stricter rules, auto-fix existing issues.
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+# Phase 1: Only catch actual bugs and dangerous patterns.
+# E: pycodestyle errors (subset), F: pyflakes (real bugs)
+select = ["E", "F"]
+ignore = [
+    # --- Too noisy for existing codebase (Phase 2) ---
+    "E501",   # line too long — not blocking
+    "E711",   # comparison to None (== None vs is None)
+    "E712",   # comparison to True/False
+    "E721",   # type comparison
+    # --- Known patterns in codebase ---
+    "F401",   # unused imports — many exist, not harmful
+    "F811",   # redefinition of unused name — api.py redefines resolve_market
+    "F841",   # local variable assigned but never used
+    "F541",   # f-string without placeholders (cpmm.py)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"test_*.py" = ["F811", "E501"]  # test files are more relaxed
+
+# =============================================================================
+# mypy — type checking (Phase 1: informational only)
+# =============================================================================
+# CI runs mypy but doesn't fail on errors (continue-on-error in workflow).
+# Goal: visibility into type issues, not blocking PRs yet.
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = false
+warn_unused_configs = true
+ignore_missing_imports = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+no_implicit_optional = false
+exclude = [
+    "migrations/",
+    "__pycache__/",
+    "\\.venv/",
+]
+
+# =============================================================================
+# pytest
+# =============================================================================
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

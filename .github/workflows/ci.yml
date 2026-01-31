@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint (Ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Ruff linter
+        run: ruff check .
+
+  typecheck:
+    name: Type Check (mypy)
+    runs-on: ubuntu-latest
+    # Phase 1: informational only — don't block PRs on type errors
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run mypy
+        run: mypy . --config-file pyproject.toml
+
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest test_reputation.py -v
+
+  build-check:
+    name: Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify Python syntax
+        run: |
+          python -m py_compile api.py
+          python -m py_compile cpmm.py
+          python -m py_compile models.py
+          python -m py_compile reputation.py
+          python -m py_compile resolver.py
+          python -m py_compile database.py
+          python -m py_compile rate_limiter.py
+          echo "✅ All Python files have valid syntax"
+
+      - name: Verify core imports
+        run: |
+          python -c "
+          import cpmm
+          import models
+          import reputation
+          import rate_limiter
+          print('✅ Core modules import successfully')
+          "
