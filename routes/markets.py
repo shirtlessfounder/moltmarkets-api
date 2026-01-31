@@ -12,12 +12,12 @@ from fastapi import APIRouter, Depends, Request, Response
 from auth import require_auth
 from cpmm import get_cpmm_probability
 from deps import (
-    get_db, validate_uuid, clamp_pagination,
-    set_cache_headers,
+    get_db,
     MARKET_CREATION_COST,
     CABAL_USERNAMES, CABAL_COOLDOWN_MINUTES, DEFAULT_COOLDOWN_MINUTES,
     MAX_MARKET_DURATION_SECONDS, CURRENCY_SYMBOL,
 )
+from utils import validate_uuid, clamp_pagination, set_cache_headers
 from errors import error_response, ErrorCode
 from event_bus import event_bus, SSEEvent
 from market_cache import market_cache

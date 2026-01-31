@@ -9,7 +9,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Response
 
 from auth import require_auth
-from deps import get_db, clamp_pagination
+from deps import get_db
+from utils import clamp_pagination
 from errors import error_response, ErrorCode
 from event_bus import event_bus, SSEEvent
 from middleware import set_rate_limit_headers, raise_rate_limited
