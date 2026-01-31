@@ -29,7 +29,7 @@ from psycopg2.extras import RealDictCursor
 
 from models import (
     MarketCreate, MarketResolve, MarketSummary, MarketDetail, MarketCreated,
-    BetRequest, BetResponse, SellRequest, SellResponse, Position, MarketPositions,
+    BetRequest, BetResponse, FeeBreakdown, SellRequest, SellResponse, Position, MarketPositions,
     UserProfile, UserMe, ErrorResponse, LeaderboardEntry,
     ProbabilityPoint, MarketHistory, BetHistoryItem,
     AgentRegister, AgentRegistered, AgentRegisteredWithClaim, AgentKeyReset,
@@ -1747,12 +1747,24 @@ async def place_bet(market_id: str, req: BetRequest, user: dict = Depends(requir
         prob_after=prob_after,
     )
     
+    # Fetch updated balance for the response
+    updated_user = db.get_user(user["id"])
+    new_balance = updated_user["balance"] if updated_user else user["balance"] - total_cost
+    
     return BetResponse(
         bet_id=bet["id"],
         market_id=bet["market_id"],
         user_id=bet["user_id"],
         outcome=bet["outcome"],
         amount=bet["amount"],
+        fee=trade_fee,
+        fee_breakdown=FeeBreakdown(
+            total_fee=trade_fee,
+            creator_fee=creator_fee,
+            platform_fee=trade_fee - creator_fee,
+        ),
+        total_cost=total_cost,
+        new_balance=round(new_balance, 8),
         shares=bet["shares"],
         avg_price=bet["avg_price"],
         probability_before=bet["probability_before"],

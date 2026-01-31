@@ -135,13 +135,24 @@ class BetRequest(BaseModel):
     amount: float = Field(..., gt=0, le=500, description="Bet amount in ŧ (max 500)")
 
 
+class FeeBreakdown(BaseModel):
+    """Breakdown of trading fees for a transaction."""
+    total_fee: float
+    creator_fee: float  # Portion paid to market creator
+    platform_fee: float  # Portion burned / retained by platform
+
+
 class BetResponse(BaseModel):
     """Result of placing a bet. Amounts are in points (ŧ)."""
     bet_id: str
     market_id: str
     user_id: str
     outcome: Outcome
-    amount: float
+    amount: float  # Bet amount (before fees)
+    fee: float  # Total fee charged
+    fee_breakdown: FeeBreakdown  # Detailed fee split
+    total_cost: float  # amount + fee (total deducted from balance)
+    new_balance: float  # User's balance after this trade
     shares: float
     avg_price: float  # amount / shares
     probability_before: float
