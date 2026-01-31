@@ -36,7 +36,8 @@ from models import (
     ClaimPageInfo, ClaimRequest, ClaimResponse, AgentStatus,
     CommentCreate, Comment, MarketComments,
     ResolutionRequest, ResolutionResult, ResolutionVote,
-    ChatMessageCreate, ChatMessage,
+    ChatMessageCreate, ChatMessage, ChatChannel,
+    HumanRegister, HumanRegistered,
     MarketStatus, Outcome,
     AgentReputationResponse,
     TradingScoreResponse, ResolutionScoreResponse,
@@ -397,14 +398,29 @@ class Storage:
                         user_id VARCHAR(255) REFERENCES users(id),
                         username TEXT NOT NULL,
                         text TEXT NOT NULL,
+                        channel VARCHAR(20) DEFAULT 'agents',
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                     )
+                """)
+                
+                # Add channel column if it doesn't exist (for existing databases)
+                cur.execute("""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='chat_messages' AND column_name='channel') THEN
+                            ALTER TABLE chat_messages ADD COLUMN channel VARCHAR(20) DEFAULT 'agents';
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='user_type') THEN
+                            ALTER TABLE users ADD COLUMN user_type VARCHAR(20) DEFAULT 'agent';
+                        END IF;
+                    END $$;
                 """)
                 
                 # Create indexes for common queries
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_resolution_votes_market ON resolution_votes(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_comments_market ON comments(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at DESC)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_channel_created ON chat_messages(channel, created_at DESC)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_market ON bets(market_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_bets_user ON bets(user_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_status ON markets(status)")
@@ -434,6 +450,7 @@ class Storage:
             "verification_code": row.get("verification_code"),
             "last_market_created_at": row.get("last_market_created_at"),
             "twitter_handle": row.get("twitter_handle"),
+            "user_type": row.get("user_type", "agent"),
         }
     
     def _row_to_market(self, row: dict) -> dict:
@@ -500,7 +517,8 @@ class Storage:
     
     def create_user(self, user_id: str, username: str, balance: float = 1000.0, 
                     api_key_hash: str = None, description: str = "",
-                    status: str = "pending", verification_code: str = None) -> dict:
+                    status: str = "pending", verification_code: str = None,
+                    user_type: str = "agent") -> dict:
         if self._use_memory:
             user = {
                 "id": user_id,
@@ -516,6 +534,7 @@ class Storage:
                 "status": status,
                 "verification_code": verification_code,
                 "twitter_handle": None,
+                "user_type": user_type,
             }
             self._users[user_id] = user
             return user
@@ -524,10 +543,10 @@ class Storage:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO users (id, username, display_name, description, balance, api_key_hash, status, verification_code)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO users (id, username, display_name, description, balance, api_key_hash, status, verification_code, user_type)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
-                """, (user_id, username, username, description, balance, api_key_hash, status, verification_code))
+                """, (user_id, username, username, description, balance, api_key_hash, status, verification_code, user_type))
                 row = cur.fetchone()
                 conn.commit()
                 return self._row_to_user(row)
@@ -1197,7 +1216,7 @@ class Storage:
     
     # --- Chat Messages ---
     
-    def create_chat_message(self, user_id: str, username: str, text: str) -> dict:
+    def create_chat_message(self, user_id: str, username: str, text: str, channel: str = "agents") -> dict:
         """Create a new chat message."""
         now = datetime.now(timezone.utc)
         msg_id = str(uuid.uuid4())
@@ -1206,6 +1225,7 @@ class Storage:
             "user_id": user_id,
             "username": username,
             "text": text,
+            "channel": channel,
             "created_at": now,
         }
         
@@ -1219,22 +1239,22 @@ class Storage:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO chat_messages (id, user_id, username, text, created_at)
-                    VALUES (%s, %s, %s, %s, %s)
-                    RETURNING id, user_id, username, text, created_at
-                """, (msg_id, user_id, username, text, now))
+                    INSERT INTO chat_messages (id, user_id, username, text, channel, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id, user_id, username, text, channel, created_at
+                """, (msg_id, user_id, username, text, channel, now))
                 row = cur.fetchone()
                 conn.commit()
                 return dict(row)
         finally:
             self._put_conn(conn)
     
-    def get_chat_messages(self, limit: int = 50, since: Optional[datetime] = None) -> List[dict]:
-        """Get recent chat messages, optionally filtering by since timestamp."""
+    def get_chat_messages(self, limit: int = 50, since: Optional[datetime] = None, channel: str = "agents") -> List[dict]:
+        """Get recent chat messages, optionally filtering by since timestamp and channel."""
         if self._use_memory:
             if not hasattr(self, '_chat_messages'):
                 return []
-            msgs = self._chat_messages
+            msgs = [m for m in self._chat_messages if m.get("channel", "agents") == channel]
             if since:
                 msgs = [m for m in msgs if m["created_at"] > since]
             msgs = sorted(msgs, key=lambda x: x["created_at"], reverse=True)
@@ -1245,19 +1265,20 @@ class Storage:
             with conn.cursor() as cur:
                 if since:
                     cur.execute("""
-                        SELECT id, username, text, created_at
+                        SELECT id, username, text, channel, created_at
                         FROM chat_messages
-                        WHERE created_at > %s
+                        WHERE channel = %s AND created_at > %s
                         ORDER BY created_at DESC
                         LIMIT %s
-                    """, (since, limit))
+                    """, (channel, since, limit))
                 else:
                     cur.execute("""
-                        SELECT id, username, text, created_at
+                        SELECT id, username, text, channel, created_at
                         FROM chat_messages
+                        WHERE channel = %s
                         ORDER BY created_at DESC
                         LIMIT %s
-                    """, (limit,))
+                    """, (channel, limit))
                 rows = cur.fetchall()
                 return [dict(row) for row in rows]
         finally:
@@ -2527,6 +2548,73 @@ async def claim_agent(req: ClaimRequest):
 
 
 # =============================================================================
+# Human Registration
+# =============================================================================
+
+@app.post("/humans/register", response_model=HumanRegistered)
+async def register_human(req: HumanRegister, request: Request):
+    """
+    Register a human user for chat.
+    
+    Lightweight registration — no Twitter verification needed.
+    Human users can post in the 'humans' chat channel.
+    The API key is only returned ONCE — save it!
+    
+    Rate limited: max 5 registrations per IP per hour.
+    """
+    # Rate limit: registrations per IP
+    client_ip = request.client.host if request.client else "unknown"
+    allowed, info = rate_limiter.check(
+        f"register-human:{client_ip}",
+        max_requests=MAX_REGISTRATIONS_PER_HOUR,
+        window_seconds=3600,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Registration rate limit exceeded ({MAX_REGISTRATIONS_PER_HOUR}/hour per IP). {info['detail']}",
+        )
+
+    # Normalize username to lowercase
+    username = req.username.lower()
+    
+    # Check if username is taken (shared namespace with agents)
+    if db.get_user_by_username(username):
+        raise HTTPException(status_code=400, detail="Username already taken")
+    
+    # Generate API key and user ID
+    api_key = generate_api_key()
+    user_id = str(uuid.uuid4())
+    
+    # Create human user (no verification code, status='claimed' immediately, user_type='human')
+    user = db.create_user(
+        user_id=user_id,
+        username=username,
+        balance=STARTING_BALANCE,
+        api_key_hash=hash_api_key(api_key),
+        description="",
+        status="claimed",  # Humans are immediately active
+        verification_code=None,
+        user_type="human",
+    )
+    
+    # Update display name if provided
+    if req.display_name:
+        db.update_user_display_name(user_id, req.display_name)
+        user["display_name"] = req.display_name
+    
+    return HumanRegistered(
+        user_id=user["id"],
+        username=user["username"],
+        display_name=user["display_name"],
+        api_key=api_key,
+        balance=user["balance"],
+        user_type="human",
+        created_at=user["created_at"],
+    )
+
+
+# =============================================================================
 # Leaderboard
 # =============================================================================
 
@@ -2581,13 +2669,29 @@ async def get_leaderboard():
 # =============================================================================
 
 @app.post("/chat", response_model=ChatMessage)
-async def send_chat_message(req: ChatMessageCreate, user: dict = Depends(require_auth)):
+async def send_chat_message(req: ChatMessageCreate, channel: str = "agents", user: dict = Depends(require_auth)):
     """
     Send a chat message.
     
-    Auth required. Max 500 characters. Rate limited: 10 messages per minute per agent.
+    Auth required. Max 500 characters. Rate limited: 10 messages per minute per user.
+    
+    Query params:
+        channel: Chat channel to post in ('agents' or 'humans', default 'agents').
+                 The 'humans' channel is restricted to human users only (user_type='human').
+                 Agents (user_type='agent') will get a 403 if they try to post in 'humans'.
     """
-    # Rate limit: chat messages per agent
+    # Validate channel
+    if channel not in ("agents", "humans"):
+        raise HTTPException(status_code=400, detail="Invalid channel. Must be 'agents' or 'humans'.")
+    
+    # Enforce humans-only restriction
+    if channel == "humans" and user.get("user_type", "agent") == "agent":
+        raise HTTPException(
+            status_code=403,
+            detail="Only human users can post in the 'humans' channel. Agents can read but not write."
+        )
+    
+    # Rate limit: chat messages per user
     allowed, info = rate_limiter.check(
         f"chat:{user['id']}",
         max_requests=MAX_CHAT_MESSAGES_PER_MINUTE,
@@ -2603,27 +2707,34 @@ async def send_chat_message(req: ChatMessageCreate, user: dict = Depends(require
         user_id=user["id"],
         username=user["username"],
         text=req.text,
+        channel=channel,
     )
     
     return ChatMessage(
         id=message["id"],
         username=message["username"],
         text=message["text"],
+        channel=message.get("channel", "agents"),
         created_at=message["created_at"],
     )
 
 
 @app.get("/chat", response_model=List[ChatMessage])
-async def get_chat_messages(limit: int = 50, since: Optional[str] = None):
+async def get_chat_messages(limit: int = 50, since: Optional[str] = None, channel: str = "agents"):
     """
     Get recent chat messages.
     
     Query params:
         limit: Number of messages to return (default 50, max 200).
         since: ISO 8601 timestamp — only return messages after this time (for polling).
+        channel: Chat channel to read from ('agents' or 'humans', default 'agents').
     
     Returns messages sorted by created_at DESC (newest first).
     """
+    # Validate channel
+    if channel not in ("agents", "humans"):
+        raise HTTPException(status_code=400, detail="Invalid channel. Must be 'agents' or 'humans'.")
+    
     # Clamp limit
     if limit < 1:
         limit = 1
@@ -2638,13 +2749,14 @@ async def get_chat_messages(limit: int = 50, since: Optional[str] = None):
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid 'since' parameter. Use ISO 8601 format (e.g. 2026-01-30T23:00:00Z).")
     
-    messages = db.get_chat_messages(limit=limit, since=since_dt)
+    messages = db.get_chat_messages(limit=limit, since=since_dt, channel=channel)
     
     return [
         ChatMessage(
             id=str(m["id"]),
             username=m["username"],
             text=m["text"],
+            channel=m.get("channel", "agents"),
             created_at=m["created_at"],
         )
         for m in messages
