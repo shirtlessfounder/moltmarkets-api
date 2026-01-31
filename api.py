@@ -638,6 +638,21 @@ class Storage:
         finally:
             self._put_conn(conn)
     
+    def update_user_api_key(self, user_id: str, key_hash: str):
+        """Update a user's API key hash (for key regeneration)."""
+        if self._use_memory:
+            if user_id in self._users:
+                self._users[user_id]["api_key_hash"] = key_hash
+            return
+        
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE users SET api_key_hash = %s WHERE id = %s", (key_hash, user_id))
+                conn.commit()
+        finally:
+            self._put_conn(conn)
+    
     def increment_user_markets_created(self, user_id: str):
         """Increment user's markets_created counter."""
         if self._use_memory:
@@ -2384,6 +2399,36 @@ async def admin_delete_user(username: str, x_admin_secret: str = Header(None)):
     db.delete_user(user["id"])
     
     return {"deleted": True, "username": username, "user_id": user["id"]}
+
+
+@app.post("/admin/users/{username}/regenerate-key")
+async def admin_regenerate_api_key(username: str, x_admin_secret: str = Header(None)):
+    """
+    Regenerate API key for a user (admin only).
+    Returns the new API key — save it, it won't be shown again!
+    """
+    if not ADMIN_SECRET:
+        raise HTTPException(status_code=503, detail="Admin endpoints disabled — ADMIN_SECRET not configured")
+    if x_admin_secret != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid admin secret")
+    
+    user = db.get_user_by_username(username)
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    
+    # Generate new API key
+    new_api_key = generate_api_key()
+    key_hash = hash_api_key(new_api_key)
+    
+    # Update in database
+    db.update_user_api_key(user["id"], key_hash)
+    
+    return {
+        "username": username,
+        "user_id": user["id"],
+        "api_key": new_api_key,
+        "warning": "Save this key! It will not be shown again."
+    }
 
 
 @app.get("/claim/{user_id}", response_model=ClaimPageInfo)
