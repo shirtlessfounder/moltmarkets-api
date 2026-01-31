@@ -14,7 +14,6 @@ Route handlers live in the ``routes/`` package.  This file wires up:
   - Lifespan (startup / shutdown)
 """
 
-import logging
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
@@ -29,6 +28,7 @@ from errors import (
     http_exception_handler, unhandled_exception_handler,
 )
 from fastapi import HTTPException
+from logger import configure_logging, get_logger
 from middleware import configure_middleware
 from models import Outcome
 from routes import (
@@ -42,7 +42,10 @@ from routes import (
 from sse import router as sse_router
 from storage import Storage
 
-logger = logging.getLogger(__name__)
+# Configure structured JSON logging before anything else
+configure_logging()
+
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Global storage instance — shared via deps module
@@ -61,10 +64,10 @@ async def lifespan(app: FastAPI):
         db.create_user("demo-user", "demo_user", balance=0.0)
     market_count = db.count_markets()
     user_count = db.count_users()
-    print(f"MoltMarkets API started with {market_count} markets, {user_count} users")
+    logger.info("api_started", market_count=market_count, user_count=user_count)
     yield
     db.close_pool()
-    print("MoltMarkets API shutting down")
+    logger.info("api_shutdown")
 
 
 # ---------------------------------------------------------------------------
