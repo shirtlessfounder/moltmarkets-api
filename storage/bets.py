@@ -324,6 +324,7 @@ class BetStorageMixin:
         """Get sparkline data (last N price points) for multiple markets in one query.
 
         Returns dict mapping market_id -> list of {timestamp, probability} points.
+        Includes initial 50% point at market creation to match /history endpoint.
         Uses window functions for efficient batch retrieval instead of N+1 queries.
 
         See: https://github.com/shirtlessfounder/moltmarkets-api/issues/X
@@ -335,12 +336,20 @@ class BetStorageMixin:
             # Fallback for in-memory storage
             result = defaultdict(list)
             for market_id in market_ids:
+                # Add initial point at market creation (50% probability)
+                market = self._markets.get(market_id)
+                if market:
+                    result[market_id].append({
+                        "timestamp": market["created_at"],
+                        "probability": 0.5,
+                    })
+                
                 bets = sorted(
                     [b for b in self._bets.values() if b["market_id"] == market_id],
                     key=lambda x: x["created_at"],
                 )
-                # Take last N bets
-                recent = bets[-limit:] if len(bets) > limit else bets
+                # Take last N-1 bets (since we added initial point)
+                recent = bets[-(limit-1):] if len(bets) > (limit-1) else bets
                 for bet in recent:
                     result[market_id].append({
                         "timestamp": bet["created_at"],
@@ -351,7 +360,21 @@ class BetStorageMixin:
         conn = self._get_conn()
         try:
             with conn.cursor() as cur:
-                # Use window function to get last N bets per market efficiently
+                # First, get market creation timestamps for initial 50% points
+                cur.execute("""
+                    SELECT id, created_at FROM markets WHERE id = ANY(%s)
+                """, (list(market_ids),))
+                market_rows = cur.fetchall()
+                
+                result = defaultdict(list)
+                # Add initial 50% point for each market
+                for row in market_rows:
+                    result[row["id"]].append({
+                        "timestamp": row["created_at"],
+                        "probability": 0.5,
+                    })
+                
+                # Use window function to get last N-1 bets per market
                 cur.execute("""
                     WITH ranked_bets AS (
                         SELECT
@@ -369,10 +392,9 @@ class BetStorageMixin:
                     FROM ranked_bets
                     WHERE rn <= %s
                     ORDER BY market_id, created_at ASC
-                """, (list(market_ids), limit))
+                """, (list(market_ids), limit - 1))
                 rows = cur.fetchall()
 
-                result = defaultdict(list)
                 for row in rows:
                     result[row["market_id"]].append({
                         "timestamp": row["created_at"],
