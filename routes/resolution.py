@@ -5,10 +5,11 @@ Resolution endpoints — resolve, request-resolution, committee voting.
 import logging
 import os
 from datetime import datetime, timezone
+from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, Request
 
-from auth import require_auth
+from auth import require_auth, verify_admin_secret
 from committee import form_committee, check_committee_unanimity
 from deps import get_db
 from payouts import calculate_and_distribute_payouts
@@ -36,8 +37,14 @@ router = APIRouter(tags=["markets"])
 # =============================================================================
 
 @router.post("/markets/{market_id}/resolve", response_model=MarketDetail)
-async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depends(require_auth)):
-    """Resolve a market. Only creator can resolve.
+async def resolve_market(
+    market_id: str,
+    req: MarketResolve,
+    request: Request,
+    user: dict = Depends(require_auth),
+    x_admin_secret: Optional[str] = Header(None),
+):
+    """Resolve a market. Creator or admin can resolve.
 
     Issue #115: Markets remain OPEN and tradeable until resolution.
     - Creator calls resolve on an OPEN market → initiates resolution.
@@ -45,6 +52,9 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
     - If other traders exist: forms committee, transitions to RESOLVING,
       and requires committee vote process (30-minute window).
     - After the committee deadline, creator regains unilateral resolve.
+    
+    Admin override: If X-Admin-Secret header is provided and valid,
+    any authenticated user can resolve any market (bypasses creator check).
     """
     db = get_db()
     validate_uuid(market_id, "market_id")
@@ -52,7 +62,18 @@ async def resolve_market(market_id: str, req: MarketResolve, user: dict = Depend
     if not market:
         return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
 
-    if market["creator_id"] != user["id"]:
+    # Check if admin override is being used
+    is_admin = False
+    if x_admin_secret:
+        try:
+            verify_admin_secret(x_admin_secret, request)
+            is_admin = True
+        except Exception:
+            # Invalid admin secret — fall through to creator check
+            pass
+
+    # Allow resolution if user is creator OR admin
+    if not is_admin and market["creator_id"] != user["id"]:
         return error_response(403, "Only creator can resolve market", ErrorCode.FORBIDDEN)
 
     if market["status"] == MarketStatus.RESOLVED:
