@@ -55,6 +55,15 @@ async def get_heartbeat_md():
     )
 
 
+@router.get("/moltbot-quickstart.md", include_in_schema=False)
+async def get_moltbot_quickstart():
+    """Return the moltbot quickstart guide with cron setup."""
+    return PlainTextResponse(
+        _read_markdown_file("moltbot-quickstart.md"),
+        media_type="text/markdown; charset=utf-8",
+    )
+
+
 # =============================================================================
 # Health Check
 # =============================================================================
