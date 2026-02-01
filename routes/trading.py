@@ -10,7 +10,7 @@ import logging
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 
 from auth import require_auth
 from cpmm import CpmmState, calculate_cpmm_purchase, calculate_cpmm_sale, get_cpmm_probability
@@ -27,16 +27,18 @@ from models import (
     BetHistoryItem,
     MarketStatus, Outcome,
     PaginationMeta, PaginatedBetHistoryItem,
+    DryRunBetResponse, DryRunSellResponse,
 )
 from rate_limiter import rate_limiter, MAX_BETS_PER_MINUTE, MAX_BET_AMOUNT
+from sandbox import is_dry_run
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["trading"])
 
 
-@router.post("/markets/{market_id}/bet", response_model=BetResponse)
-async def place_bet(market_id: str, req: BetRequest, response: Response, user: dict = Depends(require_auth)):
+@router.post("/markets/{market_id}/bet")
+async def place_bet(market_id: str, req: BetRequest, request: Request, response: Response, user: dict = Depends(require_auth)):
     """Place a bet on a market.
 
     Rate limited: max 30 bets per agent per minute.
@@ -86,7 +88,7 @@ async def place_bet(market_id: str, req: BetRequest, response: Response, user: d
     trade_fee = req.amount * TRADE_FEE_RATE
     total_cost = req.amount + trade_fee
 
-    if user["balance"] < total_cost:
+    if user["balance"] < total_cost and not is_dry_run(request.headers):
         return error_response(400,
             f"Insufficient balance. Need {total_cost:.2f} (bet: {req.amount:.2f} + fee: {trade_fee:.2f})",
             ErrorCode.INSUFFICIENT_BALANCE,
@@ -99,9 +101,29 @@ async def place_bet(market_id: str, req: BetRequest, response: Response, user: d
 
     shares = result["shares"]
     if shares <= 0:
+        if is_dry_run(request.headers):
+            return DryRunBetResponse(
+                market_id=market_id, outcome=req.outcome.value, amount=req.amount,
+                shares=0, fee=trade_fee, total_cost=total_cost,
+                probability_before=prob_before, probability_after=prob_before,
+                would_succeed=False, rejection_reason="Trade would result in zero or negative shares",
+            )
         return error_response(400, "Trade would result in zero or negative shares", ErrorCode.ZERO_SHARES)
 
     prob_after = get_cpmm_probability(result["new_pool"], result["new_p"])
+
+    # --- Dry-run: return simulation without executing ---
+    if is_dry_run(request.headers):
+        would_succeed = user["balance"] >= total_cost
+        rejection_reason = None
+        if not would_succeed:
+            rejection_reason = f"Insufficient balance. Need {total_cost:.2f} (bet: {req.amount:.2f} + fee: {trade_fee:.2f}), have {user['balance']:.2f}"
+        return DryRunBetResponse(
+            market_id=market_id, outcome=req.outcome.value, amount=req.amount,
+            shares=shares, fee=trade_fee, total_cost=total_cost,
+            probability_before=prob_before, probability_after=prob_after,
+            would_succeed=would_succeed, rejection_reason=rejection_reason,
+        )
 
     db.update_user_balance(user["id"], -total_cost)
 
@@ -178,14 +200,14 @@ async def place_bet(market_id: str, req: BetRequest, response: Response, user: d
     )
 
 
-@router.post("/markets/{market_id}/bets", response_model=BetResponse)
-async def place_bet_plural_alias(market_id: str, req: BetRequest, response: Response, user: dict = Depends(require_auth)):
+@router.post("/markets/{market_id}/bets")
+async def place_bet_plural_alias(market_id: str, req: BetRequest, request: Request, response: Response, user: dict = Depends(require_auth)):
     """Place a bet on a market (alias for POST /markets/{id}/bet)."""
-    return await place_bet(market_id, req, response, user)
+    return await place_bet(market_id, req, request, response, user)
 
 
-@router.post("/markets/{market_id}/sell", response_model=SellResponse)
-async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(require_auth)):
+@router.post("/markets/{market_id}/sell")
+async def sell_shares(market_id: str, req: SellRequest, request: Request, user: dict = Depends(require_auth)):
     """Sell shares back to the market."""
     db = get_db()
     validate_uuid(market_id, "market_id")
@@ -210,7 +232,17 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
         return error_response(400, status_msg, ErrorCode.MARKET_CLOSED)
 
     position = db.get_position(market_id, user["id"])
+    dry_run = is_dry_run(request.headers)
+
     if not position:
+        if dry_run:
+            return DryRunSellResponse(
+                market_id=market_id, outcome=req.outcome.value,
+                shares_to_sell=req.shares, amount_received=0, fee=0,
+                probability_before=get_cpmm_probability(market["pool"], market["p"]),
+                probability_after=get_cpmm_probability(market["pool"], market["p"]),
+                would_succeed=False, rejection_reason="You have no position in this market",
+            )
         return error_response(400, "You have no position in this market", ErrorCode.NO_POSITION)
 
     if req.outcome == Outcome.YES:
@@ -219,6 +251,15 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
         available_shares = position["no_shares"]
 
     if available_shares < req.shares:
+        if dry_run:
+            return DryRunSellResponse(
+                market_id=market_id, outcome=req.outcome.value,
+                shares_to_sell=req.shares, amount_received=0, fee=0,
+                probability_before=get_cpmm_probability(market["pool"], market["p"]),
+                probability_after=get_cpmm_probability(market["pool"], market["p"]),
+                would_succeed=False,
+                rejection_reason=f"Insufficient shares. You have {available_shares:.2f} {req.outcome.value} shares",
+            )
         return error_response(400,
             f"Insufficient shares. You have {available_shares:.2f} {req.outcome.value} shares",
             ErrorCode.INSUFFICIENT_SHARES,
@@ -237,6 +278,15 @@ async def sell_shares(market_id: str, req: SellRequest, user: dict = Depends(req
     amount_after_fee = amount_before_fee - trade_fee
 
     prob_after = get_cpmm_probability(result["new_pool"], result["new_p"])
+
+    # --- Dry-run: return simulation without executing ---
+    if dry_run:
+        return DryRunSellResponse(
+            market_id=market_id, outcome=req.outcome.value,
+            shares_to_sell=req.shares, amount_received=amount_after_fee,
+            fee=trade_fee, probability_before=prob_before,
+            probability_after=prob_after, would_succeed=True,
+        )
 
     db.update_user_balance(user["id"], amount_after_fee)
 

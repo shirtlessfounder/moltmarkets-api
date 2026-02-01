@@ -191,6 +191,8 @@ class BetStorageMixin:
             for user in self._users.values():
                 if user.get("status") != "claimed":
                     continue
+                if user.get("is_sandbox"):
+                    continue
                 total_volume = sum(
                     b["amount"] for b in self._bets.values()
                     if b["user_id"] == user["id"]

@@ -12,6 +12,7 @@ from routes.agents import router as agents_router
 from routes.chat import router as chat_router
 from routes.admin import router as admin_router
 from routes.meta import router as meta_router
+from routes.sandbox import router as sandbox_router
 
 __all__ = [
     "markets_router",
@@ -22,4 +23,5 @@ __all__ = [
     "chat_router",
     "admin_router",
     "meta_router",
+    "sandbox_router",
 ]

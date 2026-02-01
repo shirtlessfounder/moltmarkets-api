@@ -115,6 +115,23 @@ async def require_auth(
     return user
 
 
+async def optional_auth(
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+) -> Optional[dict]:
+    """Optional authentication — returns user dict or None."""
+    api_key = None
+    if authorization and authorization.startswith("Bearer "):
+        api_key = authorization[7:]
+    elif x_api_key:
+        api_key = x_api_key
+
+    if not api_key:
+        return None
+
+    return _db.get_user_by_api_key(api_key)
+
+
 # ---------------------------------------------------------------------------
 # Admin Authentication
 # ---------------------------------------------------------------------------
