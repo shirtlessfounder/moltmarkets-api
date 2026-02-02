@@ -19,6 +19,7 @@ from utils import validate_uuid, clamp_pagination
 from errors import error_response, ErrorCode
 from event_bus import event_bus, SSEEvent
 from market_cache import market_cache
+from history_cache import history_cache
 from middleware import set_rate_limit_headers, raise_rate_limited
 from models import (
     BetRequest, BetResponse, FeeBreakdown,
@@ -176,6 +177,9 @@ async def place_bet(market_id: str, req: BetRequest, request: Request, response:
         },
         market_id=market_id,
     ))
+
+    # Invalidate history cache for this market (new bet added)
+    history_cache.invalidate(market_id)
 
     return BetResponse(
         bet_id=bet["id"],
@@ -355,11 +359,22 @@ async def get_market_bets(
     limit: Optional[int] = None,
     offset: Optional[int] = None,
 ):
-    """Get bets for a market with pagination."""
-    db = get_db()
+    """Get bets for a market with pagination.
+    
+    Cached with invalidation on new bets — bet history is append-only.
+    Note: Only caches first page (offset=0) to keep cache simple.
+    """
     validate_uuid(market_id, "market_id")
     limit, offset = clamp_pagination(limit, offset)
+    
+    # Only cache first page to avoid complexity
+    cache_key = f"bets:{limit}" if offset == 0 else None
+    if cache_key:
+        cached = history_cache.get(cache_key, market_id)
+        if cached:
+            return cached
 
+    db = get_db()
     market = db.get_market(market_id)
     if not market:
         return error_response(404, "Market not found", ErrorCode.MARKET_NOT_FOUND)
@@ -386,7 +401,13 @@ async def get_market_bets(
             created_at=bet["created_at"],
         ))
 
-    return PaginatedBetHistoryItem(
+    result = PaginatedBetHistoryItem(
         data=items,
         pagination=PaginationMeta(limit=limit, offset=offset, total=total),
     )
+    
+    # Cache first page for next request
+    if cache_key:
+        history_cache.set(cache_key, market_id, result)
+    
+    return result
