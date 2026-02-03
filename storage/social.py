@@ -75,6 +75,45 @@ class SocialStorageMixin:
         finally:
             self._put_conn(conn)
 
+    def get_recent_comments(self, limit: int = 50) -> List[dict]:
+        """Get recent comments across ALL markets, with market title included.
+
+        Returns dicts with username and market_title fields for display in the
+        global chat panel (issue #160).
+        """
+        if self._use_memory:
+            if not hasattr(self, '_comments'):
+                return []
+            # In-memory: need to join with markets manually
+            comments = sorted(
+                list(self._comments.values()),
+                key=lambda x: x["created_at"],
+                reverse=True
+            )[:limit]
+            # Add market_title if we have access to markets
+            for c in comments:
+                if hasattr(self, '_markets') and c["market_id"] in self._markets:
+                    c["market_title"] = self._markets[c["market_id"]].get("title", "Unknown")
+                else:
+                    c["market_title"] = "Unknown"
+            return comments
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT c.*, u.username, m.title as market_title
+                    FROM comments c
+                    JOIN users u ON c.user_id = u.id
+                    JOIN markets m ON c.market_id = m.id
+                    ORDER BY c.created_at DESC
+                    LIMIT %s
+                """, (limit,))
+                rows = cur.fetchall()
+                return [dict(row) for row in rows]
+        finally:
+            self._put_conn(conn)
+
     # --- Resolution Votes ---
 
     def save_resolution_votes(self, market_id: str, votes: List[dict]) -> None:

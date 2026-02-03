@@ -594,6 +594,24 @@ class MarketComments(_SnakeCaseBase):
     total: int
 
 
+class RecentComment(_SnakeCaseBase):
+    """A comment with market context for the global feed (issue #160)."""
+    id: str
+    market_id: str
+    market_title: str  # Title of the market this comment belongs to
+    user_id: str
+    username: str
+    content: str
+    created_at: datetime
+    parent_id: Optional[str] = None
+
+
+class RecentCommentsResponse(_SnakeCaseBase):
+    """Recent comments across all markets."""
+    comments: List[RecentComment]
+    total: int
+
+
 # =============================================================================
 # Committee Resolution Models
 # =============================================================================
