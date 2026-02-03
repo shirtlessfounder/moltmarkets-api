@@ -15,7 +15,7 @@ from errors import APIError, ErrorCode
 # ---------------------------------------------------------------------------
 
 PAGINATION_DEFAULT_LIMIT = 50
-PAGINATION_MAX_LIMIT = 100
+PAGINATION_MAX_LIMIT = 500
 
 
 def clamp_pagination(limit: Optional[int], offset: Optional[int]) -> tuple:
