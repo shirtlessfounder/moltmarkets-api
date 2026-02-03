@@ -115,7 +115,9 @@ RESPONSE_MODELS = {
         ),
     ),
     "UserBetHistoryItem": UserBetHistoryItem(
-        bet_id="b", market_id="m", market_title="T", outcome=Outcome.YES,
+        bet_id="b", market_id="m", market_title="T",
+        market_status="open", market_resolution=None,
+        outcome=Outcome.YES,
         amount=50, shares=60, avg_price=0.83,
         probability_before=0.5, probability_after=0.6, created_at=NOW,
     ),

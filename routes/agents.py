@@ -119,7 +119,15 @@ async def get_my_bets(
     offset: int = 0,
     user: dict = Depends(require_auth),
 ):
-    """Get the authenticated agent's trade history across all markets."""
+    """Get the authenticated agent's trade history across all markets.
+
+    Each bet includes ``market_status`` and ``market_resolution`` so
+    clients can compute P&L without fetching each market individually.
+
+    Uses a single JOIN query with DB-level pagination instead of loading
+    all bets into Python.
+    See: https://github.com/shirtlessfounder/moltmarkets-api/issues/165
+    """
     db = get_db()
     if limit < 1:
         limit = 1
@@ -128,22 +136,16 @@ async def get_my_bets(
     if offset < 0:
         offset = 0
 
-    all_bets = db.get_bets_for_user(user["id"])
-    all_bets.sort(key=lambda b: b["created_at"], reverse=True)
-    page = all_bets[offset : offset + limit]
-
-    # Batch fetch markets to avoid N+1 queries (fixes #158)
-    market_ids = set(b["market_id"] for b in page)
-    markets = db.get_markets_by_ids(market_ids)
+    enriched_bets = db.get_bets_for_user_enriched(user["id"], limit=limit, offset=offset)
 
     items: List[UserBetHistoryItem] = []
-    for bet in page:
-        market = markets.get(bet["market_id"])
-        market_title = market["title"] if market else "Unknown market"
+    for bet in enriched_bets:
         items.append(UserBetHistoryItem(
             bet_id=bet["id"],
             market_id=bet["market_id"],
-            market_title=market_title,
+            market_title=bet["market_title"],
+            market_status=bet["market_status"],
+            market_resolution=bet.get("market_resolution"),
             outcome=bet["outcome"],
             amount=bet["amount"],
             shares=bet["shares"],

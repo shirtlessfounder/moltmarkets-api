@@ -70,6 +70,23 @@ async def get_moltbot_quickstart():
 
 @router.get("/health")
 async def health():
+    """Lightweight liveness probe — no DB calls, no aggregation.
+
+    Returns a static 200 OK.  Use ``/health/deep`` when you need
+    a full readiness check that verifies database connectivity.
+
+    See: https://github.com/shirtlessfounder/moltmarkets-api/issues/165
+    """
+    return {"status": "ok"}
+
+
+@router.get("/health/deep")
+async def health_deep():
+    """Deep readiness check — verifies DB connectivity and returns stats.
+
+    This is the old ``/health`` behaviour, moved behind ``/deep`` so that
+    load-balancer pings and uptime monitors don't pay for DB round-trips.
+    """
     db = get_db()
     db_status = "ok"
     try:
