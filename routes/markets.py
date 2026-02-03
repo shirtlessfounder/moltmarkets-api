@@ -36,8 +36,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["markets"])
 
 
-def _compute_resolution_stage(market: dict) -> tuple:
+def _compute_resolution_stage(market: dict, preloaded_votes: list = None) -> tuple:
     """Compute resolution stage, committee_size, and votes_cast for a RESOLVING market.
+
+    Args:
+        market: Market dict from database
+        preloaded_votes: Optional preloaded committee votes to avoid duplicate query.
+                        If None, will fetch from DB.
 
     Returns (resolution_stage, committee_size, votes_cast).
     Returns (None, None, None) if market is not RESOLVING.
@@ -45,7 +50,6 @@ def _compute_resolution_stage(market: dict) -> tuple:
     if market.get("status") != MarketStatus.RESOLVING:
         return None, None, None
 
-    db = get_db()
     committee = market.get("committee") or []
     committee_size = len(committee) if committee else None
 
@@ -53,8 +57,12 @@ def _compute_resolution_stage(market: dict) -> tuple:
         # Solo creator — no committee or just the creator
         return ResolutionStage.CREATOR_PENDING, committee_size, 0
 
-    # Committee exists — check votes
-    raw_votes = db.get_committee_votes(market["id"])
+    # Committee exists — check votes (use preloaded if available)
+    if preloaded_votes is not None:
+        raw_votes = preloaded_votes
+    else:
+        db = get_db()
+        raw_votes = db.get_committee_votes(market["id"])
     votes_cast = len(raw_votes) if raw_votes else 0
 
     resolution_deadline = market.get("resolution_deadline")
@@ -195,7 +203,9 @@ def _build_market_detail(market: dict, creator_username: str = None, include: st
     market_id = market["id"]
     
     # Build committee vote details if committee exists
+    # Fetch once and reuse for resolution_stage computation (fixes duplicate query)
     committee_votes_detail = None
+    raw_votes = []
     if market.get("committee"):
         raw_votes = db.get_committee_votes(market_id)
         if raw_votes:
@@ -208,7 +218,8 @@ def _build_market_detail(market: dict, creator_username: str = None, include: st
                 for v in raw_votes
             ]
 
-    resolution_stage, committee_size, votes_cast = _compute_resolution_stage(market)
+    # Pass preloaded votes to avoid duplicate DB query
+    resolution_stage, committee_size, votes_cast = _compute_resolution_stage(market, preloaded_votes=raw_votes)
     
     # Parse include param
     include_set = set(include.lower().split(",")) if include else set()
