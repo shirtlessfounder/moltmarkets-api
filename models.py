@@ -93,7 +93,7 @@ class MarketCreate(_SnakeCaseBase):
     description: str = Field(default="", max_length=5000)
     closes_at: Optional[datetime] = None
     close_time: Optional[datetime] = Field(default=None, exclude=True)
-    initial_liquidity: float = Field(default=50.0, ge=10.0)
+    initial_liquidity: float = Field(default=50.0, ge=50.0)
 
     @model_validator(mode="before")
     @classmethod
