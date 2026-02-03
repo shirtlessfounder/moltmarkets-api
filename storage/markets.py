@@ -174,6 +174,7 @@ class MarketStorageMixin:
     def create_market(self, market_id: str, creator_id: str, title: str,
                       description: str, closes_at: datetime,
                       initial_liquidity: float) -> MarketDict:
+        now = datetime.now(timezone.utc)
         if self._use_memory:
             pool = {"YES": initial_liquidity, "NO": initial_liquidity}
             market = MarketDict(
@@ -182,7 +183,7 @@ class MarketStorageMixin:
                 description=description,
                 status=MarketStatus.OPEN,
                 closes_at=closes_at,
-                created_at=datetime.now(timezone.utc),
+                created_at=now,
                 resolved_at=None,
                 resolution=None,
                 total_volume=0.0,
@@ -192,6 +193,7 @@ class MarketStorageMixin:
                 version=1,
                 committee=None,
                 resolution_deadline=None,
+                last_traded_at=now,  # Initialize to created_at
             )
             self._markets[market_id] = market
             self._positions[market_id] = {}
@@ -202,10 +204,10 @@ class MarketStorageMixin:
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO markets (id, title, description, closes_at, creator_id, pool_yes, pool_no, p)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO markets (id, title, description, closes_at, creator_id, pool_yes, pool_no, p, last_traded_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
-                """, (market_id, title, description, closes_at, creator_id, initial_liquidity, initial_liquidity, 0.5))
+                """, (market_id, title, description, closes_at, creator_id, initial_liquidity, initial_liquidity, 0.5, now))
                 row = cur.fetchone()
 
                 # Increment user's markets_created
@@ -221,6 +223,7 @@ class MarketStorageMixin:
             market["pool"] = new_pool
             market["p"] = new_p
             market["total_volume"] += volume_delta
+            market["last_traded_at"] = datetime.now(timezone.utc)
             return
 
         conn = self._get_conn()
@@ -228,7 +231,7 @@ class MarketStorageMixin:
             with conn.cursor() as cur:
                 cur.execute("""
                     UPDATE markets
-                    SET pool_yes = %s, pool_no = %s, p = %s, total_volume = total_volume + %s
+                    SET pool_yes = %s, pool_no = %s, p = %s, total_volume = total_volume + %s, last_traded_at = NOW()
                     WHERE id = %s
                 """, (new_pool["YES"], new_pool["NO"], new_p, volume_delta, market_id))
                 conn.commit()

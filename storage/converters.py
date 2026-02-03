@@ -65,6 +65,7 @@ class ConverterMixin:
             version=int(row.get("version", 1)),
             committee=committee,
             resolution_deadline=row.get("resolution_deadline"),
+            last_traded_at=row.get("last_traded_at"),
         )
 
     def _row_to_bet(self, row: Optional[Dict[str, Any]]) -> Optional[BetDict]:
