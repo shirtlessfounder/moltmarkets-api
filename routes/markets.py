@@ -14,6 +14,7 @@ from cpmm import get_cpmm_probability
 from deps import (
     get_db,
     MARKET_CREATION_COST,
+    MIN_CREATION_LIQUIDITY,
     CABAL_USERNAMES, CABAL_COOLDOWN_MINUTES, DEFAULT_COOLDOWN_MINUTES,
     MAX_MARKET_DURATION_SECONDS, CURRENCY_SYMBOL,
 )
@@ -381,11 +382,18 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
             "Market duration cannot exceed 1 hour during testing phase",
             ErrorCode.MARKET_DURATION_EXCEEDED)
 
-    if user["balance"] < MARKET_CREATION_COST:
+    # Creation cost = initial liquidity (the full amount seeds the pool
+    # and is recoverable at resolution via the winning-pool residual).
+    # Previously MARKET_CREATION_COST was a flat 100ŧ while initial_liquidity
+    # defaulted to 50ŧ — the 50ŧ gap was silently burned.  See issue #170.
+    creation_cost = req.initial_liquidity
+
+    if user["balance"] < creation_cost:
         return error_response(400,
-            f"Insufficient balance. Market creation costs {MARKET_CREATION_COST}{CURRENCY_SYMBOL}.",
+            f"Insufficient balance. Market creation costs {creation_cost}{CURRENCY_SYMBOL} "
+            f"(= initial liquidity). Minimum: {MIN_CREATION_LIQUIDITY}{CURRENCY_SYMBOL}.",
             ErrorCode.INSUFFICIENT_BALANCE,
-            detail={"balance": user["balance"], "required": MARKET_CREATION_COST})
+            detail={"balance": user["balance"], "required": creation_cost})
 
     username = user.get("username", "").lower()
     cooldown_minutes = CABAL_COOLDOWN_MINUTES if username in CABAL_USERNAMES else DEFAULT_COOLDOWN_MINUTES
@@ -401,7 +409,7 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
                 ErrorCode.RATE_LIMITED,
                 detail={"retry_after_minutes": round(remaining, 1)})
 
-    db.update_user_balance(user["id"], -MARKET_CREATION_COST)
+    db.update_user_balance(user["id"], -creation_cost)
 
     market_id = str(uuid.uuid4())
     market = db.create_market(
@@ -453,7 +461,7 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
         creator_username=user["username"],
         pool=market["pool"],
         p=market["p"],
-        creation_cost=MARKET_CREATION_COST,
+        creation_cost=creation_cost,
         tip=tip,
         warning=warning,
     )

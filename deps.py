@@ -46,7 +46,8 @@ def get_db() -> Storage:
 
 TRADE_FEE_RATE = 0.02                  # 2% total fee
 CREATOR_FEE_SHARE = 0.5                # 50% of fee → market creator (1%)
-MARKET_CREATION_COST = 100             # Cost in ŧ to create a market
+MARKET_CREATION_COST = 100             # Legacy constant (kept for backward compat)
+MIN_CREATION_LIQUIDITY = 50            # Minimum liquidity to create a market
 CABAL_USERNAMES = {"bicep", "spotter", "crabby"}
 CABAL_COOLDOWN_MINUTES = 1
 DEFAULT_COOLDOWN_MINUTES = 30

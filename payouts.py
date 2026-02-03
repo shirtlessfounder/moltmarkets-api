@@ -43,15 +43,25 @@ def calculate_and_distribute_payouts(market_id: str, outcome) -> int:
             paid += 1
 
     # Step 2: Credit pool residual to creator
+    #
+    # The winning pool represents the AMM's remaining winning-side shares.
+    # For an untraded market, winning_pool == initial_liquidity (full
+    # recovery).  For traded markets, the value may differ due to AMM
+    # gains/losses — this is expected market-making risk.
+    #
+    # Only the winning side has value (losing shares = 0ŧ).
+    # The losing pool is zeroed in Step 3.
     if market:
         pool = market["pool"]
         winning_pool = pool["YES"] if outcome == Outcome.YES else pool["NO"]
+        losing_pool = pool["NO"] if outcome == Outcome.YES else pool["YES"]
 
         if winning_pool > 0.001:
             db.update_user_balance(market["creator_id"], winning_pool)
             logger.info(
-                "Pool residual %.4f credited to creator %s for market %s",
-                winning_pool, market["creator_id"], market_id,
+                "Pool residual %.4f credited to creator %s for market %s "
+                "(losing pool %.4f forfeited)",
+                winning_pool, market["creator_id"], market_id, losing_pool,
             )
 
         # Step 3: Set pool to terminal state (probability = 1.0 or 0.0)
