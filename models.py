@@ -797,3 +797,20 @@ class SandboxResetResponse(_SnakeCaseBase):
     """Response after resetting sandbox balance."""
     new_balance: float
     message: str
+
+
+# =============================================================================
+# Transactions Ledger (issue #173)
+# =============================================================================
+
+class TransactionItem(_SnakeCaseBase):
+    """A single balance-changing event in the ledger."""
+    id: str
+    user_id: str
+    amount: float
+    type: str
+    market_id: Optional[str] = None
+    related_user_id: Optional[str] = None
+    balance_after: float
+    metadata: Optional[Dict] = None
+    created_at: datetime

@@ -126,18 +126,26 @@ async def place_bet(market_id: str, req: BetRequest, request: Request, response:
             would_succeed=would_succeed, rejection_reason=rejection_reason,
         )
 
-    db.update_user_balance(user["id"], -total_cost)
+    bet_id = str(uuid.uuid4())
+
+    db.update_user_balance(
+        user["id"], -total_cost,
+        tx_type="buy", market_id=market_id,
+        metadata={"bet_id": bet_id, "outcome": req.outcome.value, "shares": shares},
+    )
 
     creator_fee = trade_fee * CREATOR_FEE_SHARE
     if market["creator_id"] != user["id"]:
-        db.update_user_balance(market["creator_id"], creator_fee)
+        db.update_user_balance(
+            market["creator_id"], creator_fee,
+            tx_type="creator_fee", market_id=market_id,
+            related_user_id=user["id"],
+        )
 
     db.update_market_pool(market_id, result["new_pool"], result["new_p"], req.amount)
     db.update_position(market_id, user["id"], req.outcome, shares, req.amount)
 
     market_cache.invalidate()
-
-    bet_id = str(uuid.uuid4())
     bet = db.create_bet(
         bet_id=bet_id,
         market_id=market_id,
@@ -295,11 +303,19 @@ async def sell_shares(market_id: str, req: SellRequest, request: Request, user: 
             probability_after=prob_after, would_succeed=True,
         )
 
-    db.update_user_balance(user["id"], amount_after_fee)
+    db.update_user_balance(
+        user["id"], amount_after_fee,
+        tx_type="sell", market_id=market_id,
+        metadata={"outcome": req.outcome.value, "shares_sold": req.shares},
+    )
 
     creator_fee = trade_fee * CREATOR_FEE_SHARE
     if market["creator_id"] != user["id"]:
-        db.update_user_balance(market["creator_id"], creator_fee)
+        db.update_user_balance(
+            market["creator_id"], creator_fee,
+            tx_type="creator_fee", market_id=market_id,
+            related_user_id=user["id"],
+        )
 
     db.update_market_pool(market_id, result["new_pool"], result["new_p"], 0)
     db.reduce_position(market_id, user["id"], req.outcome, req.shares)

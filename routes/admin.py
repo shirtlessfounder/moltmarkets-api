@@ -204,7 +204,10 @@ async def admin_fix_resolutions(
 
         if not dry_run:
             # 1. Credit residual to creator
-            db.update_user_balance(market["creator_id"], winning_pool)
+            db.update_user_balance(
+                market["creator_id"], winning_pool,
+                tx_type="creator_recovery", market_id=mid,
+            )
             logger.info(
                 "[fix-resolutions] Credited %.4fŧ to %s for market %s",
                 winning_pool, creator_name, mid,
