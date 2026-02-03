@@ -14,6 +14,7 @@ Route handlers live in the ``routes/`` package.  This file wires up:
   - Lifespan (startup / shutdown)
 """
 
+import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
@@ -61,6 +62,26 @@ deps.init(db)
 # Lifespan
 # ---------------------------------------------------------------------------
 
+SWEEP_INTERVAL_SECONDS = 60  # Check for expired markets every 60s
+
+
+async def _expired_market_sweep_loop():
+    """Background loop: transition expired OPEN markets to RESOLVING."""
+    from committee import sweep_expired_markets
+    # Brief startup delay to let the app finish initializing
+    await asyncio.sleep(5)
+    logger.info("expired_market_sweep_started", interval=SWEEP_INTERVAL_SECONDS)
+    while True:
+        try:
+            count = sweep_expired_markets()
+            if count > 0:
+                from market_cache import market_cache
+                market_cache.invalidate()
+        except Exception:
+            logger.exception("expired_market_sweep_error")
+        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not db.get_user("demo-user"):
@@ -68,7 +89,17 @@ async def lifespan(app: FastAPI):
     market_count = db.count_markets()
     user_count = db.count_users()
     logger.info("api_started", market_count=market_count, user_count=user_count)
+
+    # Start background sweep for expired markets (issue #154)
+    sweep_task = asyncio.create_task(_expired_market_sweep_loop())
+
     yield
+
+    sweep_task.cancel()
+    try:
+        await sweep_task
+    except asyncio.CancelledError:
+        pass
     db.close_pool()
     logger.info("api_shutdown")
 
