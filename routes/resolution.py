@@ -233,9 +233,15 @@ async def get_committee_status(market_id: str):
 
     # Get votes
     raw_votes = db.get_committee_votes(market_id)
+    
+    # Batch fetch usernames for voters (required by CommitteeVoteDetail)
+    voter_ids = {v["agent_id"] for v in raw_votes}
+    voter_users = db.get_users_by_ids(voter_ids) if voter_ids else {}
+    
     votes = [
         CommitteeVoteDetail(
             agent_id=v["agent_id"],
+            agent_username=voter_users.get(v["agent_id"], {}).get("username", "unknown"),
             outcome=CommitteeOutcome(v["outcome"]),
             timestamp=v["created_at"],
         )
