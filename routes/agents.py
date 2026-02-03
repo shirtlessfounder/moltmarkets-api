@@ -132,9 +132,13 @@ async def get_my_bets(
     all_bets.sort(key=lambda b: b["created_at"], reverse=True)
     page = all_bets[offset : offset + limit]
 
+    # Batch fetch markets to avoid N+1 queries (fixes #158)
+    market_ids = set(b["market_id"] for b in page)
+    markets = db.get_markets_by_ids(market_ids)
+
     items: List[UserBetHistoryItem] = []
     for bet in page:
-        market = db.get_market(bet["market_id"])
+        market = markets.get(bet["market_id"])
         market_title = market["title"] if market else "Unknown market"
         items.append(UserBetHistoryItem(
             bet_id=bet["id"],
