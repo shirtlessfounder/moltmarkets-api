@@ -167,6 +167,8 @@ async def place_bet(market_id: str, req: BetRequest, request: Request, response:
         },
         market_id=market_id,
     ))
+    # Get updated market for last_traded_at
+    updated_market = db.get_market(market_id)
     await event_bus.publish(SSEEvent(
         event="market_update",
         data={
@@ -174,6 +176,7 @@ async def place_bet(market_id: str, req: BetRequest, request: Request, response:
             "probability": prob_after,
             "total_volume": market["total_volume"] + req.amount,
             "pool": result["new_pool"],
+            "last_traded_at": updated_market["last_traded_at"].isoformat() if updated_market and updated_market.get("last_traded_at") else None,
         },
         market_id=market_id,
     ))

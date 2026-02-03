@@ -69,6 +69,7 @@ class MarketDict(TypedDict):
     version: int
     committee: Optional[List[str]]
     resolution_deadline: Optional[datetime]
+    last_traded_at: Optional[datetime]  # For bump feed sorting (issue #160)
 
 
 class MarketWithCreatorDict(MarketDict, total=False):

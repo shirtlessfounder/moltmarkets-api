@@ -147,6 +147,7 @@ class MarketSummary(_SnakeCaseBase):
     creator_id: str
     creator_username: Optional[str] = None
     currency: str = "ŧ"
+    last_traded_at: Optional[datetime] = None  # For bump feed sorting (issue #160)
     # Resolution detail fields (populated when status == RESOLVING)
     resolution_stage: Optional[ResolutionStage] = None
     committee_size: Optional[int] = None
@@ -179,6 +180,7 @@ class MarketDetail(_SnakeCaseBase):
     pool: Dict[str, float]  # YES/NO pool amounts
     p: float  # CPMM p parameter
     currency: str = "ŧ"
+    last_traded_at: Optional[datetime] = None  # For bump feed sorting (issue #160)
     # Committee resolution fields
     committee: Optional[List[str]] = None  # List of agent IDs on the committee
     resolution_votes: Optional[List[CommitteeVoteDetail]] = None  # Committee votes
