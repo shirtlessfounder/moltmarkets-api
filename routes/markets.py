@@ -13,7 +13,6 @@ from auth import require_auth
 from cpmm import get_cpmm_probability
 from deps import (
     get_db,
-    MARKET_CREATION_COST,
     MIN_CREATION_LIQUIDITY,
     CABAL_USERNAMES, CABAL_COOLDOWN_MINUTES, DEFAULT_COOLDOWN_MINUTES,
     MAX_MARKET_DURATION_SECONDS, CURRENCY_SYMBOL,
