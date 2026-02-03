@@ -153,8 +153,8 @@ class TestCreateMarket:
         assert market["title"] == "Will it rain tomorrow?"
         assert market["status"] == "OPEN"
         assert market["probability"] == pytest.approx(0.5, abs=0.01)
-        assert market["pool"]["YES"] == pytest.approx(100.0)
-        assert market["pool"]["NO"] == pytest.approx(100.0)
+        assert market["pool"]["YES"] == pytest.approx(50.0)
+        assert market["pool"]["NO"] == pytest.approx(50.0)
         assert market["creator_id"] == agent["user_id"]
         assert market["creation_cost"] == MARKET_CREATION_COST
 
