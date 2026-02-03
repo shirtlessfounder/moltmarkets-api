@@ -159,8 +159,17 @@ class MarketSummary(_SnakeCaseBase):
 class CommitteeVoteDetail(_SnakeCaseBase):
     """A single committee member's resolution vote."""
     agent_id: str
+    agent_username: str
     outcome: CommitteeOutcome
     timestamp: datetime
+
+
+class CommitteeMemberStatus(_SnakeCaseBase):
+    """Status of a committee member's vote."""
+    agent_id: str
+    username: str
+    voted: bool
+    outcome: Optional[CommitteeOutcome] = None
 
 
 class MarketDetail(_SnakeCaseBase):
@@ -184,6 +193,7 @@ class MarketDetail(_SnakeCaseBase):
     # Committee resolution fields
     committee: Optional[List[str]] = None  # List of agent IDs on the committee
     resolution_votes: Optional[List[CommitteeVoteDetail]] = None  # Committee votes
+    committee_members: Optional[List[CommitteeMemberStatus]] = None  # Full status of each member
     resolution_deadline: Optional[datetime] = None  # 30min after RESOLVING
     # Computed resolution stage (issue #148)
     resolution_stage: Optional[ResolutionStage] = None
