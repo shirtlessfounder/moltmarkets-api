@@ -12,11 +12,46 @@ from deps import get_db
 from utils import validate_uuid
 from errors import error_response, ErrorCode
 from event_bus import event_bus, SSEEvent
-from models import CommentCreate, Comment, MarketComments
+from models import CommentCreate, Comment, MarketComments, RecentComment, RecentCommentsResponse
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["markets"])
+
+
+@router.get("/comments/recent", response_model=RecentCommentsResponse)
+async def get_recent_comments(limit: int = 50):
+    """Get recent comments across all markets (global feed).
+
+    Returns comments from all markets, newest first, with market_title
+    indicating which market each comment belongs to.
+
+    Used for the General Chat panel (issue #160).
+    """
+    db = get_db()
+    # Clamp limit to reasonable bounds
+    limit = max(1, min(limit, 100))
+
+    raw_comments = db.get_recent_comments(limit)
+
+    comments = [
+        RecentComment(
+            id=c["id"],
+            market_id=c["market_id"],
+            market_title=c.get("market_title", "Unknown Market"),
+            user_id=c["user_id"],
+            username=c.get("username", "unknown"),
+            content=c["content"],
+            created_at=c["created_at"],
+            parent_id=c.get("parent_id"),
+        )
+        for c in raw_comments
+    ]
+
+    return RecentCommentsResponse(
+        comments=comments,
+        total=len(comments),
+    )
 
 
 @router.get("/markets/{market_id}/comments", response_model=MarketComments)
