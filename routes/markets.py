@@ -25,7 +25,7 @@ from history_cache import history_cache
 from models import (
     MarketCreate, MarketSummary, MarketDetail, MarketCreated,
     ProbabilityPoint, MarketHistory, SparklinePoint,
-    CommitteeVoteDetail, CommitteeOutcome,
+    CommitteeVoteDetail, CommitteeOutcome, CommitteeMemberStatus,
     MarketStatus, ResolutionStage,
     PaginationMeta, PaginatedMarketSummary,
     BetHistoryItem, Comment,
@@ -205,18 +205,42 @@ def _build_market_detail(market: dict, creator_username: str = None, include: st
     # Build committee vote details if committee exists
     # Fetch once and reuse for resolution_stage computation (fixes duplicate query)
     committee_votes_detail = None
+    committee_members_status = None
     raw_votes = []
-    if market.get("committee"):
+    committee_ids = market.get("committee") or []
+    
+    if committee_ids:
         raw_votes = db.get_committee_votes(market_id)
+        
+        # Build a map of agent_id -> vote for quick lookup
+        votes_by_agent = {v["agent_id"]: v for v in raw_votes}
+        
+        # Batch fetch all committee member usernames
+        committee_users = db.get_users_by_ids(set(committee_ids))
+        
+        # Build vote details with usernames
         if raw_votes:
             committee_votes_detail = [
                 CommitteeVoteDetail(
                     agent_id=v["agent_id"],
+                    agent_username=committee_users.get(v["agent_id"], {}).get("username", "unknown"),
                     outcome=CommitteeOutcome(v["outcome"]),
                     timestamp=v["created_at"],
                 )
                 for v in raw_votes
             ]
+        
+        # Build full committee member status list
+        committee_members_status = []
+        for agent_id in committee_ids:
+            user = committee_users.get(agent_id, {})
+            vote = votes_by_agent.get(agent_id)
+            committee_members_status.append(CommitteeMemberStatus(
+                agent_id=agent_id,
+                username=user.get("username", "unknown"),
+                voted=vote is not None,
+                outcome=CommitteeOutcome(vote["outcome"]) if vote else None,
+            ))
 
     # Pass preloaded votes to avoid duplicate DB query
     resolution_stage, committee_size, votes_cast = _compute_resolution_stage(market, preloaded_votes=raw_votes)
@@ -300,6 +324,7 @@ def _build_market_detail(market: dict, creator_username: str = None, include: st
         last_traded_at=market.get("last_traded_at"),
         committee=market.get("committee"),
         resolution_votes=committee_votes_detail,
+        committee_members=committee_members_status,
         resolution_deadline=market.get("resolution_deadline"),
         resolution_stage=resolution_stage,
         committee_size=committee_size,

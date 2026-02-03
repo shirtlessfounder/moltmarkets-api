@@ -103,6 +103,30 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
+    def get_users_by_ids(self, user_ids: set) -> Dict[str, UserDict]:
+        """Batch fetch multiple users by ID.
+        
+        Returns dict mapping user_id -> UserDict for efficient lookups.
+        Used by committee voter visibility (issue #XXX).
+        """
+        if not user_ids:
+            return {}
+
+        if self._use_memory:
+            return {uid: self._users[uid] for uid in user_ids if uid in self._users}
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM users WHERE id = ANY(%s)",
+                    (list(user_ids),),
+                )
+                rows = cur.fetchall()
+                return {row["id"]: self._row_to_user(row) for row in rows}
+        finally:
+            self._put_conn(conn)
+
     def update_api_key(self, user_id: str, new_key_hash: str) -> None:
         """Update user's API key hash."""
         if self._use_memory:
