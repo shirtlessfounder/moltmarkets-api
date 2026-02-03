@@ -30,7 +30,7 @@ from fastapi.testclient import TestClient
 os.environ.pop("DATABASE_URL", None)
 
 from api import app, db  # noqa: E402
-from deps import STARTING_BALANCE, TRADE_FEE_RATE, MARKET_CREATION_COST  # noqa: E402
+from deps import STARTING_BALANCE, TRADE_FEE_RATE, MARKET_CREATION_COST, MIN_CREATION_LIQUIDITY  # noqa: E402
 from rate_limiter import rate_limiter  # noqa: E402
 
 
@@ -156,14 +156,17 @@ class TestCreateMarket:
         assert market["pool"]["YES"] == pytest.approx(50.0)
         assert market["pool"]["NO"] == pytest.approx(50.0)
         assert market["creator_id"] == agent["user_id"]
-        assert market["creation_cost"] == MARKET_CREATION_COST
+        # Creation cost now equals initial_liquidity (default 50), not old flat MARKET_CREATION_COST
+        assert market["creation_cost"] == pytest.approx(50.0)
 
     def test_create_market_deducts_balance(self, client):
         agent = _register_agent(client)
         _create_market(client, agent["headers"])
 
         me = client.get("/me", headers=agent["headers"]).json()
-        assert me["balance"] == pytest.approx(STARTING_BALANCE - MARKET_CREATION_COST, abs=0.01)
+        # Creation cost = initial_liquidity (default 50), not old flat MARKET_CREATION_COST
+        default_liquidity = 50.0
+        assert me["balance"] == pytest.approx(STARTING_BALANCE - default_liquidity, abs=0.01)
 
     def test_create_market_closes_in_past(self, client):
         agent = _register_agent(client)
@@ -533,7 +536,7 @@ class TestEdgeCases:
 
     def test_create_market_insufficient_balance(self, client):
         agent = _register_agent(client, "broke_creator")
-        db._users[agent["user_id"]]["balance"] = 10.0  # Below MARKET_CREATION_COST
+        db._users[agent["user_id"]]["balance"] = 10.0  # Below MIN_CREATION_LIQUIDITY (50)
 
         closes = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
         resp = client.post("/markets", json={
@@ -698,6 +701,168 @@ class TestReadEndpoints:
         # /leaderboard now returns a paginated envelope {data: [...], pagination: {...}}
         assert "data" in body
         assert isinstance(body["data"], list)
+
+
+# ===================================================================
+# 8. Liquidity Reclaim (issue #170)
+# ===================================================================
+
+class TestLiquidityReclaim:
+    """Verify that market creators recover their seed liquidity at resolution.
+
+    The creation cost equals initial_liquidity (default 50ŧ).  The full
+    amount seeds the pool and is recoverable via the winning-pool residual
+    when the market resolves.
+
+    Previously, MARKET_CREATION_COST was a flat 100ŧ while the pool was
+    only seeded with 50ŧ — the 50ŧ gap was silently burned.
+    """
+
+    def _force_resolve(self, client, market_id, creator_headers, outcome):
+        """Initiate resolution and force past committee window if needed."""
+        resp = client.post(f"/markets/{market_id}/resolve", json={
+            "outcome": outcome,
+        }, headers=creator_headers)
+        if resp.status_code == 403:
+            m = db._markets[market_id]
+            m["resolution_deadline"] = datetime.now(timezone.utc) - timedelta(minutes=1)
+            resp = client.post(f"/markets/{market_id}/resolve", json={
+                "outcome": outcome,
+            }, headers=creator_headers)
+        assert resp.status_code == 200, f"Resolution failed: {resp.text}"
+        return resp
+
+    def test_creation_cost_equals_initial_liquidity(self, client):
+        """Creation cost deducted == initial_liquidity (no gap/burn)."""
+        creator = _register_agent(client, "liq_cost_creator")
+        bal_before = client.get("/me", headers=creator["headers"]).json()["balance"]
+
+        closes = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        resp = client.post("/markets", json={
+            "title": "Liquidity cost test",
+            "closes_at": closes,
+            "initial_liquidity": 75,
+        }, headers=creator["headers"])
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert body["creation_cost"] == pytest.approx(75.0)
+        assert body["pool"]["YES"] == pytest.approx(75.0)
+        assert body["pool"]["NO"] == pytest.approx(75.0)
+
+        bal_after = client.get("/me", headers=creator["headers"]).json()["balance"]
+        assert bal_after == pytest.approx(bal_before - 75.0, abs=0.01)
+
+    def test_full_reclaim_no_trades_yes(self, client):
+        """Creator recovers full liquidity when market resolves YES with no trades."""
+        creator = _register_agent(client, "liq_yes_creator")
+        bal_before_create = client.get("/me", headers=creator["headers"]).json()["balance"]
+
+        market = _create_market(client, creator["headers"])
+        market_id = market["id"]
+        liquidity = market["creation_cost"]
+
+        bal_after_create = client.get("/me", headers=creator["headers"]).json()["balance"]
+        assert bal_after_create == pytest.approx(bal_before_create - liquidity, abs=0.01)
+
+        self._force_resolve(client, market_id, creator["headers"], "YES")
+
+        bal_after_resolve = client.get("/me", headers=creator["headers"]).json()["balance"]
+        # Creator should get full liquidity back — net cost ≈ 0
+        assert bal_after_resolve == pytest.approx(bal_before_create, abs=0.01), (
+            f"Creator should recover full liquidity. Before: {bal_before_create}, "
+            f"After: {bal_after_resolve}, Liquidity: {liquidity}"
+        )
+
+    def test_full_reclaim_no_trades_no(self, client):
+        """Creator recovers full liquidity when market resolves NO with no trades."""
+        creator = _register_agent(client, "liq_no_creator")
+        bal_before = client.get("/me", headers=creator["headers"]).json()["balance"]
+
+        market = _create_market(client, creator["headers"])
+        market_id = market["id"]
+        liquidity = market["creation_cost"]
+
+        self._force_resolve(client, market_id, creator["headers"], "NO")
+
+        bal_after = client.get("/me", headers=creator["headers"]).json()["balance"]
+        assert bal_after == pytest.approx(bal_before, abs=0.01), (
+            f"Creator should recover full liquidity on NO resolution too"
+        )
+
+    def test_custom_liquidity_reclaim(self, client):
+        """Creator specifying higher liquidity recovers it fully."""
+        creator = _register_agent(client, "liq_custom_creator")
+        bal_before = client.get("/me", headers=creator["headers"]).json()["balance"]
+
+        closes = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        resp = client.post("/markets", json={
+            "title": "Custom liquidity test",
+            "closes_at": closes,
+            "initial_liquidity": 200,
+        }, headers=creator["headers"])
+        assert resp.status_code == 200
+        market = resp.json()
+        market_id = market["id"]
+
+        assert market["pool"]["YES"] == pytest.approx(200.0)
+        assert market["creation_cost"] == pytest.approx(200.0)
+
+        bal_after_create = client.get("/me", headers=creator["headers"]).json()["balance"]
+        assert bal_after_create == pytest.approx(bal_before - 200.0, abs=0.01)
+
+        self._force_resolve(client, market_id, creator["headers"], "YES")
+
+        bal_after_resolve = client.get("/me", headers=creator["headers"]).json()["balance"]
+        assert bal_after_resolve == pytest.approx(bal_before, abs=0.01)
+
+    def test_zero_sum_with_trading(self, client):
+        """Total payouts == total money in (zero-sum accounting)."""
+        creator = _register_agent(client, "zs_creator")
+        bettor = _register_agent(client, "zs_bettor")
+
+        creator_bal_start = client.get("/me", headers=creator["headers"]).json()["balance"]
+        bettor_bal_start = client.get("/me", headers=bettor["headers"]).json()["balance"]
+
+        market = _create_market(client, creator["headers"])
+        market_id = market["id"]
+        liquidity = market["creation_cost"]
+
+        # Place a YES bet
+        resp = client.post(f"/markets/{market_id}/bet", json={
+            "outcome": "YES", "amount": 50,
+        }, headers=bettor["headers"])
+        assert resp.status_code == 200
+        bet_fee = resp.json()["fee"]
+
+        self._force_resolve(client, market_id, creator["headers"], "YES")
+
+        creator_bal_end = client.get("/me", headers=creator["headers"]).json()["balance"]
+        bettor_bal_end = client.get("/me", headers=bettor["headers"]).json()["balance"]
+
+        # Total money in = liquidity + bet_amount + bet_fee
+        # Total money out = creator_payout + bettor_payout + creator_trading_fee
+        # These should balance (zero-sum modulo platform fee)
+        total_change = (creator_bal_end - creator_bal_start) + (bettor_bal_end - bettor_bal_start)
+        # The only "leak" is the platform's share of trading fees
+        platform_fee = bet_fee * 0.5  # platform gets 50% of trading fee
+        assert total_change == pytest.approx(-platform_fee, abs=0.1), (
+            f"Economy should be zero-sum (minus platform fee). "
+            f"Creator Δ={creator_bal_end - creator_bal_start:.2f}, "
+            f"Bettor Δ={bettor_bal_end - bettor_bal_start:.2f}, "
+            f"Platform fee={platform_fee:.2f}"
+        )
+
+    def test_min_liquidity_enforced(self, client):
+        """Cannot create a market with liquidity below MIN_CREATION_LIQUIDITY."""
+        agent = _register_agent(client, "liq_min_agent")
+        closes = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        resp = client.post("/markets", json={
+            "title": "Too cheap market",
+            "closes_at": closes,
+            "initial_liquidity": 10,  # Below minimum of 50
+        }, headers=agent["headers"])
+        assert resp.status_code == 422  # Pydantic validation: ge=50
 
 
 # ===================================================================
