@@ -28,6 +28,7 @@ os.environ.pop("DATABASE_URL", None)
 from api import app, db  # noqa: E402
 from committee import (  # noqa: E402
     COMMITTEE_WINDOW_MINUTES, form_committee, check_committee_unanimity,
+    sweep_expired_markets,
 )
 from models import MarketStatus, Outcome  # noqa: E402
 from rate_limiter import rate_limiter  # noqa: E402
@@ -940,3 +941,86 @@ class TestEdgeCases:
         resp = client.post(f"/markets/{fake_uuid}/resolution-vote",
             json={"outcome": "YES"}, headers=creator["headers"])
         assert resp.status_code == 404
+
+
+# ===========================================================================
+# 6. Auto-Sweep Expired Markets Tests (issue #154)
+# ===========================================================================
+
+class TestSweepExpiredMarkets:
+    """Test the background sweep that transitions expired OPEN → RESOLVING."""
+
+    def test_sweep_transitions_expired_market(self):
+        """Market past closes_at should be transitioned to RESOLVING."""
+        creator = _register_agent(client, "sweep_c")
+        # Create market that closes 1 minute from now, then backdate closes_at
+        market = _create_market(client, creator["headers"], minutes=1)
+        market_id = market["id"]
+
+        # Backdate closes_at to the past
+        m = db.get_market(market_id)
+        m["closes_at"] = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+
+        assert m["status"] == "OPEN"
+        count = sweep_expired_markets()
+        assert count == 1
+
+        m = db.get_market(market_id)
+        assert m["status"] == MarketStatus.RESOLVING
+        assert m.get("committee") is not None
+
+    def test_sweep_ignores_future_market(self):
+        """Market not yet past closes_at should remain OPEN."""
+        creator = _register_agent(client, "sweep_future_c")
+        market = _create_market(client, creator["headers"], minutes=60)
+        market_id = market["id"]
+
+        count = sweep_expired_markets()
+        assert count == 0
+
+        m = db.get_market(market_id)
+        assert m["status"] == "OPEN"
+
+    def test_sweep_ignores_already_resolving(self):
+        """Market already in RESOLVING should not be re-processed."""
+        creator = _register_agent(client, "sweep_resolving_c")
+        market = _create_market(client, creator["headers"], minutes=1)
+        market_id = market["id"]
+
+        # Backdate and force to RESOLVING
+        m = db.get_market(market_id)
+        m["closes_at"] = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        _force_resolving(market_id)
+
+        count = sweep_expired_markets()
+        assert count == 0
+
+    def test_sweep_transitions_multiple_markets(self):
+        """Multiple expired markets should all be transitioned."""
+        creator = _register_agent(client, "sweep_multi_c")
+        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        ids = []
+        # Create markets directly in storage to avoid rate limiter
+        for i in range(3):
+            mid = str(uuid.uuid4())
+            db._markets[mid] = {
+                "id": mid,
+                "title": f"Sweep test {i}",
+                "description": "test",
+                "creator_id": creator["user_id"],
+                "status": "OPEN",
+                "closes_at": past,
+                "probability": 0.5,
+                "pool": {"YES": 50.0, "NO": 50.0},
+                "volume": 0.0,
+                "num_traders": 0,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            ids.append(mid)
+
+        count = sweep_expired_markets()
+        assert count == 3
+
+        for mid in ids:
+            m = db.get_market(mid)
+            assert m["status"] == MarketStatus.RESOLVING

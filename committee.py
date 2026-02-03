@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from deps import get_db
+from models import MarketStatus
 
 logger = logging.getLogger(__name__)
 
@@ -84,19 +85,56 @@ def check_committee_unanimity(market_id: str, committee: list) -> Optional[str]:
     return None
 
 
-def maybe_transition_market(market: dict, market_id: str) -> None:
-    """No-op: markets no longer auto-transition based on closes_at.
+def transition_market_to_resolving(market_id: str, market: dict) -> bool:
+    """Transition a single OPEN market to RESOLVING and form its committee.
 
-    Deprecated since issue #115: markets remain OPEN and tradeable until
-    explicitly resolved via POST /markets/{id}/resolve.  The closes_at
-    field is now display-only ("event end time").
+    Returns True if the transition happened, False if skipped.
     """
-    pass
+    db = get_db()
+
+    if market.get("status") != "OPEN":
+        return False
+
+    committee = form_committee(market_id, market)
+    db.update_market_status(market_id, MarketStatus.RESOLVING)
+    market["status"] = MarketStatus.RESOLVING
+
+    logger.info(
+        "Auto-transitioned market %s to RESOLVING (committee: %d members)",
+        market_id, len(committee),
+    )
+    return True
 
 
-def bg_transition_expired_markets() -> None:
-    """No-op: markets no longer auto-transition based on closes_at.
+def sweep_expired_markets() -> int:
+    """Find all OPEN markets past closes_at and transition them to RESOLVING.
 
-    Deprecated since issue #115.
+    Returns the number of markets transitioned.
+    Called periodically by the background sweep task.
     """
-    pass
+    db = get_db()
+    now = datetime.now(timezone.utc)
+    transitioned = 0
+
+    markets = db.list_markets()
+    for m in markets:
+        if m.get("status") != "OPEN":
+            continue
+        closes_at = m.get("closes_at")
+        if not closes_at:
+            continue
+        # Normalize closes_at to datetime if it's a string
+        if isinstance(closes_at, str):
+            closes_at = datetime.fromisoformat(closes_at.replace("Z", "+00:00"))
+        if closes_at.tzinfo is None:
+            closes_at = closes_at.replace(tzinfo=timezone.utc)
+        if now > closes_at:
+            try:
+                transition_market_to_resolving(m["id"], m)
+                transitioned += 1
+            except Exception:
+                logger.exception("Failed to transition market %s", m["id"])
+
+    if transitioned > 0:
+        logger.info("Sweep: transitioned %d expired markets to RESOLVING", transitioned)
+    return transitioned

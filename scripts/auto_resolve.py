@@ -20,7 +20,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from typing import Optional, Tuple, Literal
+from typing import Optional, Tuple
 
 import requests
 
@@ -398,7 +398,7 @@ def resolve_market_api(market_id: str, outcome: str, market_status: str = "OPEN"
         error_data = resp.json()
         if error_data.get("code") == "COMMITTEE_WINDOW_ACTIVE":
             # Try committee vote endpoint instead
-            print(f"   📋 Committee window active, casting vote...")
+            print("   📋 Committee window active, casting vote...")
             vote_resp = requests.post(
                 f"{API_BASE}/markets/{market_id}/resolution-vote",
                 json={"outcome": outcome},
@@ -409,7 +409,7 @@ def resolve_market_api(market_id: str, outcome: str, market_status: str = "OPEN"
             if vote_resp.status_code == 200:
                 vote_data = vote_resp.json()
                 if vote_data.get("auto_resolved"):
-                    print(f"   ✅ Committee vote triggered auto-resolution!")
+                    print("   ✅ Committee vote triggered auto-resolution!")
                     return {"status": "RESOLVED", "resolution": outcome}
                 else:
                     # Vote cast but no auto-resolve yet
@@ -467,7 +467,7 @@ def main():
     errors = []
     
     for market in markets:
-        print(f"─" * 60)
+        print("─" * 60)
         print(f"📌 {market['title']}")
         print(f"   ID: {market['id']}")
         print(f"   Closed: {market['closes_at']} ({market.get('_hours_past_close', 0):.1f}h ago)")
@@ -500,7 +500,7 @@ def main():
                     "reasoning": reasoning,
                 })
         else:
-            print(f"   ⚠️ Needs manual resolution")
+            print("   ⚠️ Needs manual resolution")
             print(f"   📝 Reason: {reasoning}")
             manual_needed.append({
                 "id": market["id"],
