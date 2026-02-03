@@ -38,7 +38,11 @@ def calculate_and_distribute_payouts(market_id: str, outcome) -> int:
         winning_shares = pos["yes_shares"] if outcome == Outcome.YES else pos["no_shares"]
         if winning_shares > 0:
             payout = winning_shares
-            db.update_user_balance(pos["user_id"], payout)
+            db.update_user_balance(
+                pos["user_id"], payout,
+                tx_type="payout", market_id=market_id,
+                metadata={"outcome": outcome.value, "shares": winning_shares},
+            )
             db.update_user_profit(pos["user_id"], payout - pos["total_invested"])
             paid += 1
 
@@ -57,7 +61,10 @@ def calculate_and_distribute_payouts(market_id: str, outcome) -> int:
         losing_pool = pool["NO"] if outcome == Outcome.YES else pool["YES"]
 
         if winning_pool > 0.001:
-            db.update_user_balance(market["creator_id"], winning_pool)
+            db.update_user_balance(
+                market["creator_id"], winning_pool,
+                tx_type="creator_recovery", market_id=market_id,
+            )
             logger.info(
                 "Pool residual %.4f credited to creator %s for market %s "
                 "(losing pool %.4f forfeited)",

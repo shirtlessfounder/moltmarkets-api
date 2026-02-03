@@ -14,6 +14,7 @@ from storage.markets import MarketStorageMixin
 from storage.bets import BetStorageMixin
 from storage.positions import PositionStorageMixin
 from storage.social import SocialStorageMixin
+from storage.transactions import TransactionStorageMixin
 from storage.committee import CommitteeStorageMixin
 from storage.types import (
     BetDict,
@@ -34,6 +35,7 @@ from storage.types import (
 
 
 class Storage(
+    TransactionStorageMixin,
     CommitteeStorageMixin,
     SocialStorageMixin,
     PositionStorageMixin,

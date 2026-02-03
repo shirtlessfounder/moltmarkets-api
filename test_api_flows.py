@@ -30,7 +30,7 @@ from fastapi.testclient import TestClient
 os.environ.pop("DATABASE_URL", None)
 
 from api import app, db  # noqa: E402
-from deps import STARTING_BALANCE, TRADE_FEE_RATE, MARKET_CREATION_COST, MIN_CREATION_LIQUIDITY  # noqa: E402
+from deps import STARTING_BALANCE, TRADE_FEE_RATE  # noqa: E402
 from rate_limiter import rate_limiter  # noqa: E402
 
 
@@ -781,13 +781,12 @@ class TestLiquidityReclaim:
 
         market = _create_market(client, creator["headers"])
         market_id = market["id"]
-        liquidity = market["creation_cost"]
 
         self._force_resolve(client, market_id, creator["headers"], "NO")
 
         bal_after = client.get("/me", headers=creator["headers"]).json()["balance"]
         assert bal_after == pytest.approx(bal_before, abs=0.01), (
-            f"Creator should recover full liquidity on NO resolution too"
+            "Creator should recover full liquidity on NO resolution too"
         )
 
     def test_custom_liquidity_reclaim(self, client):
@@ -826,7 +825,6 @@ class TestLiquidityReclaim:
 
         market = _create_market(client, creator["headers"])
         market_id = market["id"]
-        liquidity = market["creation_cost"]
 
         # Place a YES bet
         resp = client.post(f"/markets/{market_id}/bet", json={

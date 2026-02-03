@@ -13,7 +13,6 @@ from auth import require_auth
 from cpmm import get_cpmm_probability
 from deps import (
     get_db,
-    MARKET_CREATION_COST,
     MIN_CREATION_LIQUIDITY,
     CABAL_USERNAMES, CABAL_COOLDOWN_MINUTES, DEFAULT_COOLDOWN_MINUTES,
     MAX_MARKET_DURATION_SECONDS, CURRENCY_SYMBOL,
@@ -409,9 +408,12 @@ async def create_market(req: MarketCreate, user: dict = Depends(require_auth)):
                 ErrorCode.RATE_LIMITED,
                 detail={"retry_after_minutes": round(remaining, 1)})
 
-    db.update_user_balance(user["id"], -creation_cost)
-
     market_id = str(uuid.uuid4())
+
+    db.update_user_balance(
+        user["id"], -creation_cost,
+        tx_type="market_creation", market_id=market_id,
+    )
     market = db.create_market(
         market_id=market_id,
         creator_id=user["id"],

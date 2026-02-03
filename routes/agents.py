@@ -31,6 +31,7 @@ from models import (
     HumanRegister, HumanRegistered,
     MarketStatus,
     PaginationMeta, PaginatedLeaderboardEntry,
+    TransactionItem,
 )
 from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR
 from reputation import compute_reputation
@@ -156,6 +157,44 @@ async def get_my_bets(
         ))
 
     return items
+
+
+@router.get("/me/transactions", response_model=List[TransactionItem])
+async def get_my_transactions(
+    limit: int = 50,
+    offset: int = 0,
+    user: dict = Depends(require_auth),
+):
+    """Get the authenticated user's transaction ledger (newest first).
+
+    Every balance change (buy, sell, payout, creator_fee, etc.) is recorded
+    as a transaction.  Use ``limit`` and ``offset`` for pagination.
+
+    See: https://github.com/shirtlessfounder/moltmarkets-api/issues/173
+    """
+    db = get_db()
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+    if offset < 0:
+        offset = 0
+
+    rows = db.get_transactions_for_user(user["id"], limit=limit, offset=offset)
+    return [
+        TransactionItem(
+            id=str(row["id"]),
+            user_id=str(row["user_id"]),
+            amount=row["amount"],
+            type=row["type"],
+            market_id=str(row["market_id"]) if row.get("market_id") else None,
+            related_user_id=str(row["related_user_id"]) if row.get("related_user_id") else None,
+            balance_after=row["balance_after"],
+            metadata=row.get("metadata"),
+            created_at=row["created_at"],
+        )
+        for row in rows
+    ]
 
 
 @router.get("/users/{user_id}", response_model=UserProfile)

@@ -141,10 +141,30 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
-    def update_user_balance(self, user_id: str, delta: float) -> float:
+    def update_user_balance(
+        self,
+        user_id: str,
+        delta: float,
+        *,
+        tx_type: Optional[str] = None,
+        market_id: Optional[str] = None,
+        related_user_id: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ) -> float:
         if self._use_memory:
             self._users[user_id]["balance"] += delta
-            return self._users[user_id]["balance"]
+            new_balance = self._users[user_id]["balance"]
+            if tx_type:
+                self.record_transaction(
+                    user_id=user_id,
+                    amount=delta,
+                    tx_type=tx_type,
+                    market_id=market_id,
+                    related_user_id=related_user_id,
+                    balance_after=new_balance,
+                    metadata=metadata,
+                )
+            return new_balance
 
         conn = self._get_conn()
         try:
@@ -154,8 +174,22 @@ class UserStorageMixin:
                     RETURNING balance
                 """, (delta, user_id))
                 row = cur.fetchone()
+                new_balance = float(row["balance"])
+
+                if tx_type:
+                    self.record_transaction(
+                        user_id=user_id,
+                        amount=delta,
+                        tx_type=tx_type,
+                        market_id=market_id,
+                        related_user_id=related_user_id,
+                        balance_after=new_balance,
+                        metadata=metadata,
+                        _cursor=cur,
+                    )
+
                 conn.commit()
-                return float(row["balance"])
+                return new_balance
         finally:
             self._put_conn(conn)
 
