@@ -9,10 +9,49 @@ import os
 
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 
 from errors import APIError, ErrorCode
 from idempotency import IdempotencyMiddleware
 from logger import RequestIDMiddleware, RequestLoggingMiddleware
+
+
+# ---------------------------------------------------------------------------
+# /api/v1/ Prefix Redirect (issue #170)
+# ---------------------------------------------------------------------------
+
+_STRIP_PREFIXES = ("/api/v1/", "/api/v1", "/api/")
+"""Common wrong prefixes agents prepend to routes."""
+
+
+class StripAPIPrefixMiddleware(BaseHTTPMiddleware):
+    """Transparently strip ``/api/v1/`` (and similar) prefixes from requests.
+
+    Many LLM agents assume a ``/api/v1/`` prefix even though the API serves
+    routes at the root.  Instead of returning a confusing 404, this middleware
+    rewrites the path and lets the request through, adding a header to signal
+    the redirect so agents can fix their client config.
+
+    See: https://github.com/shirtlessfounder/moltmarkets-api/issues/170
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.scope["path"]
+        for prefix in _STRIP_PREFIXES:
+            if path.startswith(prefix):
+                new_path = "/" + path[len(prefix):]
+                if not new_path.startswith("/"):
+                    new_path = "/" + new_path
+                request.scope["path"] = new_path
+                response = await call_next(request)
+                response.headers["X-Path-Rewritten"] = f"{path} -> {new_path}"
+                response.headers["X-API-Hint"] = (
+                    "Routes live at the root (e.g. /markets), not under /api/v1/. "
+                    "See /skill.md for correct base URL."
+                )
+                return response
+        return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -119,3 +158,7 @@ def configure_middleware(app: FastAPI) -> None:
     # Request ID middleware — outermost, ensures every request gets a
     # correlation ID available to all inner middleware and route handlers.
     app.add_middleware(RequestIDMiddleware)
+
+    # Strip /api/v1/ prefix — outermost after RequestID so the rewrite
+    # happens before any routing. Fixes agents using wrong URL prefix (#170).
+    app.add_middleware(StripAPIPrefixMiddleware)
