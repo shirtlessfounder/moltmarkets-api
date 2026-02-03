@@ -119,6 +119,55 @@ class BetStorageMixin:
         finally:
             self._put_conn(conn)
 
+    def get_bets_for_user_enriched(self, user_id: str, limit: int = 50, offset: int = 0) -> List[dict]:
+        """Get paginated bets for a user with market title/status/resolution.
+
+        Returns a single-query JOIN instead of N+1 fetches.
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/165
+        """
+        if self._use_memory:
+            # In-memory fallback: enrich from self._markets
+            bets = [b for b in self._bets.values() if b["user_id"] == user_id]
+            bets.sort(key=lambda b: b["created_at"], reverse=True)
+            page = bets[offset : offset + limit]
+            results = []
+            for bet in page:
+                market = self._markets.get(bet["market_id"])
+                enriched = dict(bet)
+                enriched["market_title"] = market["title"] if market else "Unknown market"
+                enriched["market_status"] = market["status"] if market else "unknown"
+                enriched["market_resolution"] = market.get("resolution") if market else None
+                results.append(enriched)
+            return results
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT b.*, m.title AS market_title,
+                           m.status AS market_status,
+                           m.resolution AS market_resolution
+                    FROM bets b
+                    LEFT JOIN markets m ON m.id = b.market_id
+                    WHERE b.user_id = %s
+                    ORDER BY b.created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (user_id, limit, offset),
+                )
+                rows = cur.fetchall()
+                results = []
+                for row in rows:
+                    bet = self._row_to_bet(row)
+                    bet["market_title"] = row.get("market_title") or "Unknown market"
+                    bet["market_status"] = row.get("market_status") or "unknown"
+                    bet["market_resolution"] = row.get("market_resolution")
+                    results.append(bet)
+                return results
+        finally:
+            self._put_conn(conn)
+
     def get_bets_on_markets(self, market_ids: set) -> List[BetDict]:
         """Get all bets placed on specific markets.
 

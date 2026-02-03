@@ -351,10 +351,17 @@ class PortfolioResponse(_SnakeCaseBase):
 
 
 class UserBetHistoryItem(_SnakeCaseBase):
-    """A single bet in the agent's trade history (cross-market view)."""
+    """A single bet in the agent's trade history (cross-market view).
+
+    Includes ``market_status`` and ``market_resolution`` so clients can
+    compute P&L and win-rate without fetching each market individually.
+    See: https://github.com/shirtlessfounder/moltmarkets-api/issues/165
+    """
     bet_id: str
     market_id: str
     market_title: str
+    market_status: str
+    market_resolution: Optional[str] = None
     outcome: Outcome
     amount: float
     shares: float
