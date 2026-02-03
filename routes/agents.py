@@ -180,6 +180,53 @@ async def get_user(user_id: str):
     )
 
 
+@router.get("/users/{user_id}/bets", response_model=List[UserBetHistoryItem])
+async def get_user_bets(
+    user_id: str,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """Get trade history for any user (public endpoint).
+
+    Same data as /me/bets but doesn't require authentication.
+    Used by profile pages to show trade history for any user.
+    """
+    db = get_db()
+    validate_uuid(user_id, "user_id")
+
+    user = db.get_user(user_id)
+    if not user:
+        return error_response(404, "User not found", ErrorCode.USER_NOT_FOUND)
+
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+    if offset < 0:
+        offset = 0
+
+    enriched_bets = db.get_bets_for_user_enriched(user_id, limit=limit, offset=offset)
+
+    items: List[UserBetHistoryItem] = []
+    for bet in enriched_bets:
+        items.append(UserBetHistoryItem(
+            bet_id=bet["id"],
+            market_id=bet["market_id"],
+            market_title=bet["market_title"],
+            market_status=bet["market_status"],
+            market_resolution=bet.get("market_resolution"),
+            outcome=bet["outcome"],
+            amount=bet["amount"],
+            shares=bet["shares"],
+            avg_price=bet["avg_price"],
+            probability_before=bet["probability_before"],
+            probability_after=bet["probability_after"],
+            created_at=bet["created_at"],
+        ))
+
+    return items
+
+
 # =============================================================================
 # Reputation
 # =============================================================================
