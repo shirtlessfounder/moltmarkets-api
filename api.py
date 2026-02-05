@@ -107,8 +107,8 @@ async def lifespan(app: FastAPI):
 
     sweep_task.cancel()
     try:
-        await sweep_task
-    except asyncio.CancelledError:
+        await asyncio.wait_for(sweep_task, timeout=3.0)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
         pass
     db.close_pool()
     logger.info("api_shutdown")

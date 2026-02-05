@@ -88,11 +88,8 @@ async def transfer(req: TransferRequest, user: dict = Depends(require_auth)):
     )
 
     logger.info(
-        "transfer_completed",
-        sender=user["username"],
-        recipient=recipient["username"],
-        amount=req.amount,
-        memo=memo,
+        "transfer_completed sender=%s recipient=%s amount=%s memo=%s",
+        user["username"], recipient["username"], req.amount, memo,
     )
 
     return TransferResponse(

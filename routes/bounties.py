@@ -127,11 +127,8 @@ async def create_bounty(req: BountyCreate, user: dict = Depends(require_auth)):
     )
 
     logger.info(
-        "bounty_created",
-        bounty_id=bounty_id,
-        creator=user["username"],
-        amount=req.amount,
-        title=req.title[:50],
+        "bounty_created id=%s creator=%s amount=%s title=%s",
+        bounty_id, user["username"], req.amount, req.title[:50],
     )
 
     return BountyResponse(**_enrich_bounty(bounty, db))
@@ -180,10 +177,8 @@ async def claim_bounty(bounty_id: str, user: dict = Depends(require_auth)):
     updated = db.update_bounty_status(bounty_id, "claimed", claimant_id=user["id"])
 
     logger.info(
-        "bounty_claimed",
-        bounty_id=bounty_id,
-        claimant=user["username"],
-        amount=bounty["amount"],
+        "bounty_claimed id=%s claimant=%s amount=%s",
+        bounty_id, user["username"], bounty["amount"],
     )
 
     return BountyResponse(**_enrich_bounty(updated, db))
@@ -229,11 +224,8 @@ async def release_bounty(bounty_id: str, user: dict = Depends(require_auth)):
     updated = db.update_bounty_status(bounty_id, "completed")
 
     logger.info(
-        "bounty_released",
-        bounty_id=bounty_id,
-        creator=user["username"],
-        claimant=bounty["claimant_id"],
-        amount=bounty["amount"],
+        "bounty_released id=%s creator=%s claimant=%s amount=%s",
+        bounty_id, user["username"], bounty["claimant_id"], bounty["amount"],
     )
 
     return BountyResponse(**_enrich_bounty(updated, db))
@@ -278,11 +270,8 @@ async def cancel_bounty(bounty_id: str, user: dict = Depends(require_auth)):
     updated = db.update_bounty_status(bounty_id, "cancelled")
 
     logger.info(
-        "bounty_cancelled",
-        bounty_id=bounty_id,
-        creator=user["username"],
-        amount=bounty["amount"],
-        was_claimed=bounty["status"] == "claimed",
+        "bounty_cancelled id=%s creator=%s amount=%s was_claimed=%s",
+        bounty_id, user["username"], bounty["amount"], bounty["status"] == "claimed",
     )
 
     return BountyResponse(**_enrich_bounty(updated, db))
