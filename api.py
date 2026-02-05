@@ -35,6 +35,7 @@ from fastapi import HTTPException
 from logger import configure_logging, get_logger
 from middleware import configure_middleware
 from models import Outcome
+from monitoring import init_sentry
 from routes import (
     markets_router,
     resolution_router,
@@ -51,6 +52,10 @@ from storage import Storage
 
 # Configure structured JSON logging before anything else
 configure_logging()
+
+# Initialize Sentry for error monitoring (GitHub #176)
+# Set SENTRY_DSN environment variable to enable
+init_sentry()
 
 logger = get_logger(__name__)
 

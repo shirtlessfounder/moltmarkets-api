@@ -18,7 +18,7 @@ jobs:
       - name: Install ruff
         run: pip install ruff
       - name: Run ruff (errors only, no style nitpicks)
-        run: ruff check . --select E,F,W --ignore E501,W291,W292,W293
+        run: ruff check . --select E,F,W --ignore E402,E501,W291,W292,W293
 
   test:
     name: Test

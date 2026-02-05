@@ -36,6 +36,15 @@ from models import (
 from rate_limiter import rate_limiter, MAX_REGISTRATIONS_PER_HOUR
 from reputation import compute_reputation
 from storage import hash_api_key
+from monitoring import (
+    track_registration_started,
+    track_registration_completed,
+    track_registration_failed,
+    track_claim_page_viewed,
+    track_claim_completed,
+    track_claim_failed,
+    capture_exception,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -360,20 +369,26 @@ async def register_agent(req: AgentRegister, request: Request, response: Respons
     db = get_db()
 
     client_ip = request.client.host if request.client else "unknown"
+    username = req.username.lower()
+    
+    # Track registration attempt (GitHub #176)
+    track_registration_started(username, client_ip)
+    
     allowed, info = rate_limiter.check(
         f"register:{client_ip}",
         max_requests=MAX_REGISTRATIONS_PER_HOUR,
         window_seconds=3600,
     )
     if not allowed:
+        track_registration_failed(username, "rate_limited", "Too many registration attempts")
         raise_rate_limited(
             f"Registration rate limit exceeded ({MAX_REGISTRATIONS_PER_HOUR}/hour per IP). {info['detail']}",
             info,
         )
     set_rate_limit_headers(response, info)
 
-    username = req.username.lower()
     if db.get_user_by_username(username):
+        track_registration_failed(username, "username_taken", "Username already exists")
         return error_response(400, "Username already taken", ErrorCode.ALREADY_EXISTS)
 
     is_sandbox = getattr(req, "sandbox", False)
@@ -382,20 +397,28 @@ async def register_agent(req: AgentRegister, request: Request, response: Respons
     verification_code = None if is_sandbox else generate_verification_code()
     starting_balance = get_starting_balance(sandbox=is_sandbox)
 
-    user = db.create_user(
-        user_id=user_id,
-        username=username,
-        balance=starting_balance,
-        api_key_hash=hash_api_key(api_key),
-        description=req.description or "",
-        status="claimed" if is_sandbox else "pending",
-        verification_code=verification_code,
-        is_sandbox=is_sandbox,
-    )
+    try:
+        user = db.create_user(
+            user_id=user_id,
+            username=username,
+            balance=starting_balance,
+            api_key_hash=hash_api_key(api_key),
+            description=req.description or "",
+            status="claimed" if is_sandbox else "pending",
+            verification_code=verification_code,
+            is_sandbox=is_sandbox,
+        )
+    except Exception as e:
+        track_registration_failed(username, "database_error", str(e))
+        capture_exception(e, {"username": username, "user_id": user_id})
+        raise
 
     if req.display_name:
         db.update_user_display_name(user_id, req.display_name)
         user["display_name"] = req.display_name
+
+    # Track successful registration (GitHub #176)
+    track_registration_completed(user_id, username, is_sandbox)
 
     return AgentRegisteredWithClaim(
         user_id=user["id"],
@@ -443,6 +466,9 @@ async def get_claim_info(user_id: str):
     if user.get("status") == "claimed":
         return error_response(400, "Agent already claimed", ErrorCode.ALREADY_CLAIMED)
 
+    # Track claim page view (GitHub #176)
+    track_claim_page_viewed(user_id)
+
     instructions = (
         f"To claim this agent, post a tweet containing the verification code: {user['verification_code']}\n\n"
         f"Example tweet: 'I'm claiming my AI agent \"{user['username']}\" on @moltmarkets_ofc 🦞 Verification: {user['verification_code']}'\n\n"
@@ -485,6 +511,7 @@ async def claim_agent(req: ClaimRequest):
 
     tweet_text = tweet_data.get("text", "")
     if not verify_tweet_contains_code(tweet_text, user["verification_code"]):
+        track_claim_failed(req.user_id, "verification_failed", "Tweet does not contain verification code")
         return error_response(400,
             f"Verification failed: tweet does not contain the code '{user['verification_code']}'. "
             f"Please ensure your tweet includes the exact verification code.",
@@ -495,6 +522,9 @@ async def claim_agent(req: ClaimRequest):
     db.update_user_status(req.user_id, "claimed")
     if twitter_handle:
         db.update_user_twitter_handle(req.user_id, twitter_handle)
+
+    # Track successful claim (GitHub #176)
+    track_claim_completed(req.user_id, user["username"])
 
     return ClaimResponse(
         success=True,
