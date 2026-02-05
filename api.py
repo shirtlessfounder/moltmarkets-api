@@ -14,6 +14,9 @@ Route handlers live in the ``routes/`` package.  This file wires up:
   - Lifespan (startup / shutdown)
 """
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import asyncio
 import uuid
 from contextlib import asynccontextmanager
