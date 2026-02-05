@@ -314,6 +314,24 @@ class BaseStorage:
                     END $$;
                 """)
 
+                # Bounties table (issue #180)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS bounties (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        creator_id VARCHAR(255) NOT NULL REFERENCES users(id),
+                        title TEXT NOT NULL,
+                        description TEXT DEFAULT '',
+                        amount FLOAT NOT NULL,
+                        status VARCHAR(20) NOT NULL DEFAULT 'open',
+                        claimant_id VARCHAR(255) REFERENCES users(id),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        claimed_at TIMESTAMPTZ,
+                        completed_at TIMESTAMPTZ,
+                        cancelled_at TIMESTAMPTZ,
+                        expires_at TIMESTAMPTZ
+                    )
+                """)
+
                 # Unique constraint for committee votes
                 cur.execute("""
                     DO $$
@@ -346,6 +364,12 @@ class BaseStorage:
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_closes_at ON markets(closes_at)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_status ON users(status)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_users_lower_username ON users(LOWER(username))")
+
+                # Bounties indexes (issue #180)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_bounties_status ON bounties(status)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_bounties_creator ON bounties(creator_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_bounties_claimant ON bounties(claimant_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_bounties_created ON bounties(created_at DESC)")
 
                 # Composite index for the /markets list query (status + created_at DESC)
                 # Covers the common ORDER BY created_at DESC with optional WHERE status filter
