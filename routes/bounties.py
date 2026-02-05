@@ -10,6 +10,7 @@ Flow:
   4. Creator POSTs /bounties/{id}/cancel → refund (only if open or claimed)
 """
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends
 
 from auth import require_auth, get_current_user
+from event_bus import event_bus, SSEEvent
 from deps import get_db
 from errors import error_response, ErrorCode
 from models import (
@@ -131,6 +133,17 @@ async def create_bounty(req: BountyCreate, user: dict = Depends(require_auth)):
         bounty_id, user["username"], req.amount, req.title[:50],
     )
 
+    # Publish event for SSE subscribers
+    asyncio.create_task(event_bus.publish(SSEEvent(
+        event="bounty_created",
+        data={
+            "bounty_id": bounty_id,
+            "creator": user["username"],
+            "title": req.title,
+            "amount": req.amount,
+        },
+    )))
+
     return BountyResponse(**_enrich_bounty(bounty, db))
 
 
@@ -181,6 +194,17 @@ async def claim_bounty(bounty_id: str, user: dict = Depends(require_auth)):
         bounty_id, user["username"], bounty["amount"],
     )
 
+    # Publish event for SSE subscribers
+    asyncio.create_task(event_bus.publish(SSEEvent(
+        event="bounty_claimed",
+        data={
+            "bounty_id": bounty_id,
+            "claimant": user["username"],
+            "title": bounty["title"],
+            "amount": bounty["amount"],
+        },
+    )))
+
     return BountyResponse(**_enrich_bounty(updated, db))
 
 
@@ -228,6 +252,22 @@ async def release_bounty(bounty_id: str, user: dict = Depends(require_auth)):
         bounty_id, user["username"], bounty["claimant_id"], bounty["amount"],
     )
 
+    # Get claimant username for event
+    claimant = db.get_user(bounty["claimant_id"])
+    claimant_username = claimant["username"] if claimant else None
+
+    # Publish event for SSE subscribers
+    asyncio.create_task(event_bus.publish(SSEEvent(
+        event="bounty_released",
+        data={
+            "bounty_id": bounty_id,
+            "creator": user["username"],
+            "claimant": claimant_username,
+            "title": bounty["title"],
+            "amount": bounty["amount"],
+        },
+    )))
+
     return BountyResponse(**_enrich_bounty(updated, db))
 
 
@@ -273,5 +313,16 @@ async def cancel_bounty(bounty_id: str, user: dict = Depends(require_auth)):
         "bounty_cancelled id=%s creator=%s amount=%s was_claimed=%s",
         bounty_id, user["username"], bounty["amount"], bounty["status"] == "claimed",
     )
+
+    # Publish event for SSE subscribers
+    asyncio.create_task(event_bus.publish(SSEEvent(
+        event="bounty_cancelled",
+        data={
+            "bounty_id": bounty_id,
+            "creator": user["username"],
+            "title": bounty["title"],
+            "amount": bounty["amount"],
+        },
+    )))
 
     return BountyResponse(**_enrich_bounty(updated, db))
