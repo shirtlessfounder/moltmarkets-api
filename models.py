@@ -814,3 +814,29 @@ class TransactionItem(_SnakeCaseBase):
     balance_after: float
     metadata: Optional[Dict] = None
     created_at: datetime
+
+
+# =============================================================================
+# Transfer Models (issue #180)
+# =============================================================================
+
+class TransferRequest(_SnakeCaseBase):
+    """Request to transfer ŧ to another agent."""
+    recipient: str = Field(..., min_length=1, max_length=100,
+                           description="Recipient username or user ID")
+    amount: float = Field(..., gt=0, le=1000,
+                          description="Amount in ŧ to transfer (max 1000)")
+    memo: Optional[str] = Field(None, max_length=200,
+                                description="Optional memo (e.g., 'bounty #3 payment')")
+
+
+class TransferResponse(_SnakeCaseBase):
+    """Result of a successful transfer."""
+    sender_id: str
+    sender_username: str
+    recipient_id: str
+    recipient_username: str
+    amount: float
+    memo: str = ""
+    sender_new_balance: float
+    currency: str = "ŧ"

@@ -141,6 +141,79 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
+    def transfer_balance(
+        self,
+        sender_id: str,
+        recipient_id: str,
+        amount: float,
+        memo: str = "",
+    ) -> float:
+        """Atomically transfer ŧ between two users.
+
+        Debits sender and credits recipient in a single transaction.
+        Records ledger entries for both sides.
+        Returns sender's new balance.
+
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/180
+        """
+        metadata = {"memo": memo} if memo else None
+
+        if self._use_memory:
+            # In-memory: not truly atomic but sufficient for tests
+            self._users[sender_id]["balance"] -= amount
+            self._users[recipient_id]["balance"] += amount
+            sender_balance = self._users[sender_id]["balance"]
+            recipient_balance = self._users[recipient_id]["balance"]
+
+            self.record_transaction(
+                user_id=sender_id, amount=-amount, tx_type="transfer_out",
+                related_user_id=recipient_id, balance_after=sender_balance,
+                metadata=metadata,
+            )
+            self.record_transaction(
+                user_id=recipient_id, amount=amount, tx_type="transfer_in",
+                related_user_id=sender_id, balance_after=recipient_balance,
+                metadata=metadata,
+            )
+            return sender_balance
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                # Debit sender
+                cur.execute(
+                    "UPDATE users SET balance = balance - %s WHERE id = %s RETURNING balance",
+                    (amount, sender_id),
+                )
+                sender_balance = float(cur.fetchone()["balance"])
+
+                # Credit recipient
+                cur.execute(
+                    "UPDATE users SET balance = balance + %s WHERE id = %s RETURNING balance",
+                    (amount, recipient_id),
+                )
+                recipient_balance = float(cur.fetchone()["balance"])
+
+                # Record both sides in the ledger
+                self.record_transaction(
+                    user_id=sender_id, amount=-amount, tx_type="transfer_out",
+                    related_user_id=recipient_id, balance_after=sender_balance,
+                    metadata=metadata, _cursor=cur,
+                )
+                self.record_transaction(
+                    user_id=recipient_id, amount=amount, tx_type="transfer_in",
+                    related_user_id=sender_id, balance_after=recipient_balance,
+                    metadata=metadata, _cursor=cur,
+                )
+
+                conn.commit()
+                return sender_balance
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._put_conn(conn)
+
     def update_user_balance(
         self,
         user_id: str,

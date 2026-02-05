@@ -46,6 +46,7 @@ from routes import (
     admin_router,
     meta_router,
     sandbox_router,
+    transfers_router,
 )
 from sse import router as sse_router
 from storage import Storage
@@ -172,6 +173,7 @@ app.include_router(chat_router)
 app.include_router(admin_router)
 app.include_router(meta_router)
 app.include_router(sandbox_router)
+app.include_router(transfers_router)
 
 # ---------------------------------------------------------------------------
 # Dev test runner (unchanged)
