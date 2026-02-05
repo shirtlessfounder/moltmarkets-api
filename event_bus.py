@@ -135,10 +135,24 @@ class EventBus:
 
         Blocks on the subscriber's queue. The caller should wrap this in a
         try/finally to call unsubscribe() on disconnect.
+        
+        Exits when a None sentinel is received (shutdown signal).
         """
         while True:
             event = await sub.queue.get()
+            if event is None:  # Shutdown sentinel
+                return
             yield event
+
+    async def shutdown(self):
+        """Signal all subscribers to exit by sending None sentinel."""
+        async with self._lock:
+            for sub in self._subscribers:
+                try:
+                    sub.queue.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass  # Best effort
+        logger.info("event_bus_shutdown subscriber_count=%d", len(self._subscribers))
 
 
 # ---------------------------------------------------------------------------

@@ -33,15 +33,6 @@ router = APIRouter(tags=["events"])
 
 KEEPALIVE_INTERVAL = 30  # seconds
 
-# Shutdown signal — set by lifespan to gracefully close SSE connections
-shutdown_event: asyncio.Event | None = None
-
-
-def set_shutdown_event(event: asyncio.Event):
-    """Called from lifespan to register the shutdown signal."""
-    global shutdown_event
-    shutdown_event = event
-
 
 async def _event_stream(request: Request, market_id: Optional[str] = None):
     """Async generator that yields SSE-formatted text.
@@ -49,6 +40,8 @@ async def _event_stream(request: Request, market_id: Optional[str] = None):
     Subscribes to the global event bus, yields events as they arrive,
     and sends ``:keepalive`` comments every 30 s to prevent proxies
     (Railway, Cloudflare, nginx) from closing the connection.
+    
+    Exits cleanly when event_bus.shutdown() sends None sentinel.
     """
     sub = event_bus.subscribe(market_id=market_id)
     try:
@@ -56,27 +49,24 @@ async def _event_stream(request: Request, market_id: Optional[str] = None):
         yield ": connected\n\n"
 
         while True:
-            # Check if server is shutting down
-            if shutdown_event and shutdown_event.is_set():
-                logger.info("sse_shutdown_signal", market_id=market_id)
-                break
-
             # Check if the client disconnected
             if await request.is_disconnected():
                 break
 
             try:
-                # Wait for an event with a timeout for keepalive
+                # Wait for event with keepalive timeout
                 event = await asyncio.wait_for(
-                    event_bus.listen(sub).__anext__(),
+                    sub.queue.get(),
                     timeout=KEEPALIVE_INTERVAL,
                 )
+                if event is None:  # Shutdown sentinel
+                    break
                 yield event.to_sse()
             except asyncio.TimeoutError:
-                # No event within the keepalive window — send a comment ping
+                # No event — send keepalive ping
                 yield ": keepalive\n\n"
-            except StopAsyncIteration:
-                break
+    except asyncio.CancelledError:
+        pass  # Shutdown
     finally:
         event_bus.unsubscribe(sub)
 

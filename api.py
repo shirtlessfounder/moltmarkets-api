@@ -94,27 +94,51 @@ async def _expired_market_sweep_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import signal
+    from event_bus import event_bus
+    
     if not db.get_user("demo-user"):
         db.create_user("demo-user", "demo_user", balance=0.0)
     market_count = db.count_markets()
     user_count = db.count_users()
     logger.info("api_started", market_count=market_count, user_count=user_count)
 
-    # Create shutdown event for SSE connections (issue: graceful shutdown)
-    from sse import set_shutdown_event
-    sse_shutdown = asyncio.Event()
-    set_shutdown_event(sse_shutdown)
-
     # Start background sweep for expired markets (issue #154)
     sweep_task = asyncio.create_task(_expired_market_sweep_loop())
+    
+    # Signal handler to close SSE connections BEFORE uvicorn waits
+    # (uvicorn waits for connections before running lifespan cleanup)
+    original_sigterm = signal.getsignal(signal.SIGTERM)
+    original_sigint = signal.getsignal(signal.SIGINT)
+    
+    def handle_shutdown(signum, frame):
+        logger.info("shutdown_signal_received signal=%d", signum)
+        # Schedule the async shutdown on the event loop
+        try:
+            loop = asyncio.get_running_loop()
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(event_bus.shutdown())
+            )
+        except RuntimeError:
+            pass  # No running loop
+        # Call original handler so uvicorn can proceed with shutdown
+        orig = original_sigterm if signum == signal.SIGTERM else original_sigint
+        if callable(orig):
+            orig(signum, frame)
+    
+    # Install signal handlers
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
 
     yield
 
-    # Signal SSE connections to close gracefully
-    logger.info("signaling_sse_shutdown")
-    sse_shutdown.set()
-    # Brief grace period for SSE connections to close
-    await asyncio.sleep(0.5)
+    # Restore original handlers
+    signal.signal(signal.SIGTERM, original_sigterm)
+    signal.signal(signal.SIGINT, original_sigint)
+    
+    # Cleanup (may already be done by signal handler, but safe to call twice)
+    await event_bus.shutdown()
+    await asyncio.sleep(0.3)
 
     sweep_task.cancel()
     try:
