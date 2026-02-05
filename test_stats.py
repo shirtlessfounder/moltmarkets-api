@@ -1,6 +1,5 @@
 """Tests for /stats endpoint."""
 
-import pytest
 from fastapi.testclient import TestClient
 
 from api import app
