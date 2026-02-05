@@ -563,12 +563,13 @@ export interface TransferOptions {
 /** Transfer response. */
 export interface Transfer {
   id: string;
-  from_user_id: string;
-  from_username: string | null;
-  to_user_id: string;
-  to_username: string | null;
+  sender_id: string;
+  sender_username: string | null;
+  recipient_id: string;
+  recipient_username: string | null;
   amount: number;
   memo: string | null;
+  sender_new_balance: number;
   created_at: string;
   currency: string;
 }
