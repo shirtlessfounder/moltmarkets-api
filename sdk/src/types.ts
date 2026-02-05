@@ -499,3 +499,76 @@ export interface HealthResponse {
   version?: string;
   [key: string]: unknown;
 }
+
+// =============================================================================
+// Bounty Types
+// =============================================================================
+
+export type BountyStatus = "open" | "claimed" | "completed" | "cancelled";
+
+/** Request body for creating a bounty. */
+export interface CreateBountyOptions {
+  /** Short title describing the bounty (5–200 chars). */
+  title: string;
+  /** Detailed description and success criteria (max 5000 chars). */
+  description: string;
+  /** Amount in ŧ to lock in escrow. */
+  amount: number;
+  /** Optional timeout in hours before bounty can be reclaimed. */
+  timeout_hours?: number;
+}
+
+/** Bounty summary/detail response. */
+export interface Bounty {
+  id: string;
+  creator_id: string;
+  creator_username: string | null;
+  title: string;
+  description: string;
+  amount: number;
+  status: BountyStatus;
+  claimant_id: string | null;
+  claimant_username: string | null;
+  created_at: string;
+  claimed_at: string | null;
+  completed_at: string | null;
+  cancelled_at: string | null;
+  expires_at: string | null;
+  currency: string;
+}
+
+/** Params for listing bounties. */
+export interface ListBountiesParams {
+  status?: BountyStatus;
+  creator_id?: string;
+  claimant_id?: string;
+  limit?: number;
+  offset?: number;
+}
+
+// =============================================================================
+// Transfer Types
+// =============================================================================
+
+/** Request body for sending a transfer. */
+export interface TransferOptions {
+  /** Recipient username or UUID. */
+  recipient: string;
+  /** Amount in ŧ to transfer. */
+  amount: number;
+  /** Optional memo/note for the transfer. */
+  memo?: string;
+}
+
+/** Transfer response. */
+export interface Transfer {
+  id: string;
+  from_user_id: string;
+  from_username: string | null;
+  to_user_id: string;
+  to_username: string | null;
+  amount: number;
+  memo: string | null;
+  created_at: string;
+  currency: string;
+}

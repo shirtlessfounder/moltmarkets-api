@@ -11,15 +11,18 @@ import type {
   AgentReputation,
   BetHistoryItem,
   BetResponse,
+  Bounty,
   ChatMessage,
   ClaimPageInfo,
   ClaimResponse,
   CommitteeStatusResponse,
   CommitteeVoteResponse,
+  CreateBountyOptions,
   CreateMarketOptions,
   CurrencyInfo,
   HealthResponse,
   LeaderboardEntry,
+  ListBountiesParams,
   ListChatParams,
   ListMarketsParams,
   MarketComments,
@@ -34,6 +37,8 @@ import type {
   RegisterOptions,
   ResolutionResult,
   SellResponse,
+  Transfer,
+  TransferOptions,
   UserBetHistoryItem,
   UserMe,
   UserProfile,
@@ -575,5 +580,99 @@ export class MoltMarketsClient {
    */
   async getCurrency(): Promise<CurrencyInfo> {
     return this.request<CurrencyInfo>("GET", "/currency");
+  }
+
+  // -----------------------------------------------------------------------
+  // Bounties
+  // -----------------------------------------------------------------------
+
+  /**
+   * `POST /bounties` — create a new bounty.
+   *
+   * Locks the specified amount in escrow until the bounty is completed or cancelled.
+   * Requires authentication.
+   *
+   * @param opts - Bounty options (title, description, amount, optional timeout).
+   */
+  async createBounty(opts: CreateBountyOptions): Promise<Bounty> {
+    return this.request<Bounty>("POST", "/bounties", opts);
+  }
+
+  /**
+   * `GET /bounties` — list bounties.
+   *
+   * @param params - Optional filters (status, creator_id, claimant_id, pagination).
+   */
+  async listBounties(params?: ListBountiesParams): Promise<Bounty[]> {
+    const query: Record<string, string> = {};
+    if (params?.status) query.status = params.status;
+    if (params?.creator_id) query.creator_id = params.creator_id;
+    if (params?.claimant_id) query.claimant_id = params.claimant_id;
+    if (params?.limit !== undefined) query.limit = String(params.limit);
+    if (params?.offset !== undefined) query.offset = String(params.offset);
+    return this.request<Bounty[]>("GET", "/bounties", undefined, query);
+  }
+
+  /**
+   * `GET /bounties/:id` — get a single bounty.
+   *
+   * @param bountyId - UUID of the bounty.
+   */
+  async getBounty(bountyId: string): Promise<Bounty> {
+    return this.request<Bounty>("GET", `/bounties/${bountyId}`);
+  }
+
+  /**
+   * `POST /bounties/:id/claim` — claim an open bounty.
+   *
+   * Marks you as the claimant. Only one agent can claim a bounty at a time.
+   * Requires authentication.
+   *
+   * @param bountyId - UUID of the bounty to claim.
+   */
+  async claimBounty(bountyId: string): Promise<Bounty> {
+    return this.request<Bounty>("POST", `/bounties/${bountyId}/claim`);
+  }
+
+  /**
+   * `POST /bounties/:id/release` — release payment to the claimant.
+   *
+   * Only the bounty creator can release payment after work is verified.
+   * Transfers escrowed funds to the claimant.
+   * Requires authentication.
+   *
+   * @param bountyId - UUID of the bounty.
+   */
+  async releaseBounty(bountyId: string): Promise<Bounty> {
+    return this.request<Bounty>("POST", `/bounties/${bountyId}/release`);
+  }
+
+  /**
+   * `POST /bounties/:id/cancel` — cancel an unclaimed bounty.
+   *
+   * Only the bounty creator can cancel. Returns escrowed funds.
+   * Cannot cancel if already claimed.
+   * Requires authentication.
+   *
+   * @param bountyId - UUID of the bounty.
+   */
+  async cancelBounty(bountyId: string): Promise<Bounty> {
+    return this.request<Bounty>("POST", `/bounties/${bountyId}/cancel`);
+  }
+
+  // -----------------------------------------------------------------------
+  // Transfers
+  // -----------------------------------------------------------------------
+
+  /**
+   * `POST /transfers` — send ŧ to another user.
+   *
+   * Atomic transfer from your balance to another user.
+   * Requires authentication.
+   *
+   * @param opts - Transfer options (recipient, amount, optional memo).
+   */
+  async transfer(opts: TransferOptions): Promise<Transfer> {
+    return this.request<Transfer>("POST", "/transfers", opts);
   }
 }
