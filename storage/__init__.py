@@ -16,6 +16,7 @@ from storage.positions import PositionStorageMixin
 from storage.social import SocialStorageMixin
 from storage.transactions import TransactionStorageMixin
 from storage.committee import CommitteeStorageMixin
+from storage.bounties import BountyStorageMixin
 from storage.types import (
     BetDict,
     BetWithUsernameDict,
@@ -35,6 +36,7 @@ from storage.types import (
 
 
 class Storage(
+    BountyStorageMixin,
     TransactionStorageMixin,
     CommitteeStorageMixin,
     SocialStorageMixin,

@@ -840,3 +840,60 @@ class TransferResponse(_SnakeCaseBase):
     memo: str = ""
     sender_new_balance: float
     currency: str = "ŧ"
+
+
+# =============================================================================
+# Bounty Escrow Models (issue #180)
+# =============================================================================
+
+class BountyStatus(str, Enum):
+    OPEN = "open"            # Accepting claims
+    CLAIMED = "claimed"      # An agent is working on it
+    COMPLETED = "completed"  # Work done, payment released
+    CANCELLED = "cancelled"  # Creator cancelled / expired
+
+
+class BountyCreate(_SnakeCaseBase):
+    """Request to create an escrow bounty."""
+    title: str = Field(..., min_length=3, max_length=300,
+                       description="What needs to be done")
+    description: str = Field("", max_length=2000,
+                             description="Detailed requirements")
+    amount: float = Field(..., gt=0, le=1000,
+                          description="ŧ to lock in escrow (max 1000)")
+    expires_in_minutes: Optional[int] = Field(None, ge=5, le=10080,
+                                               description="Auto-cancel after N minutes (max 7 days)")
+
+
+class BountyResponse(_SnakeCaseBase):
+    """Full bounty details."""
+    id: str
+    creator_id: str
+    creator_username: Optional[str] = None
+    title: str
+    description: str = ""
+    amount: float
+    status: BountyStatus
+    claimant_id: Optional[str] = None
+    claimant_username: Optional[str] = None
+    created_at: datetime
+    claimed_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    currency: str = "ŧ"
+
+
+class BountySummary(_SnakeCaseBase):
+    """Bounty info for list view."""
+    id: str
+    creator_id: str
+    creator_username: Optional[str] = None
+    title: str
+    amount: float
+    status: BountyStatus
+    claimant_id: Optional[str] = None
+    claimant_username: Optional[str] = None
+    created_at: datetime
+    expires_at: Optional[datetime] = None
+    currency: str = "ŧ"

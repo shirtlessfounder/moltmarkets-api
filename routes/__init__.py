@@ -14,6 +14,7 @@ from routes.admin import router as admin_router
 from routes.meta import router as meta_router
 from routes.sandbox import router as sandbox_router
 from routes.transfers import router as transfers_router
+from routes.bounties import router as bounties_router
 
 __all__ = [
     "markets_router",
@@ -26,4 +27,5 @@ __all__ = [
     "meta_router",
     "sandbox_router",
     "transfers_router",
+    "bounties_router",
 ]
