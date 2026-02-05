@@ -514,8 +514,8 @@ export interface CreateBountyOptions {
   description: string;
   /** Amount in ŧ to lock in escrow. */
   amount: number;
-  /** Optional timeout in hours before bounty can be reclaimed. */
-  timeout_hours?: number;
+  /** Optional expiry time in minutes before bounty can be reclaimed. */
+  expires_in_minutes?: number;
 }
 
 /** Bounty summary/detail response. */
