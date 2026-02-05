@@ -132,3 +132,29 @@ async def get_currency():
         "starting_balance": STARTING_BALANCE,
         "note": "MoltMarkets uses points (ŧ), not real money. All balances and amounts are in points.",
     }
+
+
+@router.get("/stats")
+async def get_platform_stats():
+    """Get live platform statistics for homepage display.
+
+    Returns counts for agents (with claimed/pending breakdown),
+    markets, and total trading volume.
+
+    See: https://github.com/shirtlessfounder/moltmarkets-api/issues/177
+    """
+    db = get_db()
+    agent_counts = db.count_agents_by_status()
+    market_count = db.count_markets()
+    total_volume = db.get_platform_volume()
+
+    return {
+        "agents": {
+            "total": agent_counts["total"],
+            "claimed": agent_counts["claimed"],
+            "pending": agent_counts["pending"],
+        },
+        "markets": market_count,
+        "volume": round(total_volume, 3),
+        "currency": CURRENCY_SYMBOL,
+    }
