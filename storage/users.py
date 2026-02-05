@@ -351,6 +351,55 @@ class UserStorageMixin:
         finally:
             self._put_conn(conn)
 
+    def count_agents_by_status(self) -> dict:
+        """Count agents grouped by status (claimed/pending/etc).
+
+        Returns dict with keys: total, claimed, pending, other.
+        Excludes sandbox agents from counts.
+
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/177
+        """
+        if self._use_memory:
+            total = claimed = pending = 0
+            for user in self._users.values():
+                if user.get("user_type") != "agent" or user.get("is_sandbox"):
+                    continue
+                total += 1
+                status = user.get("status", "pending")
+                if status == "claimed":
+                    claimed += 1
+                elif status == "pending":
+                    pending += 1
+            return {
+                "total": total,
+                "claimed": claimed,
+                "pending": pending,
+                "other": total - claimed - pending,
+            }
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE user_type = 'agent' AND NOT is_sandbox) AS total,
+                        COUNT(*) FILTER (WHERE user_type = 'agent' AND NOT is_sandbox AND status = 'claimed') AS claimed,
+                        COUNT(*) FILTER (WHERE user_type = 'agent' AND NOT is_sandbox AND status = 'pending') AS pending
+                    FROM users
+                """)
+                row = cur.fetchone()
+                total = row["total"] or 0
+                claimed = row["claimed"] or 0
+                pending = row["pending"] or 0
+                return {
+                    "total": total,
+                    "claimed": claimed,
+                    "pending": pending,
+                    "other": total - claimed - pending,
+                }
+        finally:
+            self._put_conn(conn)
+
     def reset_sandbox_balance(self, user_id: str, amount: float) -> float:
         """Reset a sandbox agent's balance and stats.
 

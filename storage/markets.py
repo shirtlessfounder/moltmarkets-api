@@ -94,6 +94,24 @@ class MarketStorageMixin:
         finally:
             self._put_conn(conn)
 
+    def get_platform_volume(self) -> float:
+        """Get total trading volume across all markets.
+
+        O(1) via SUM aggregate instead of O(N) full-table load.
+
+        See: https://github.com/shirtlessfounder/moltmarkets-api/issues/177
+        """
+        if self._use_memory:
+            return sum(m.get("total_volume", 0.0) for m in self._markets.values())
+
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COALESCE(SUM(total_volume), 0) AS total FROM markets")
+                return float(cur.fetchone()["total"])
+        finally:
+            self._put_conn(conn)
+
     def get_markets_by_ids(self, market_ids: set) -> Dict[str, MarketDict]:
         """Get specific markets by their IDs in a single query.
 
