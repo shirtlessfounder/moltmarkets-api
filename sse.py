@@ -33,6 +33,15 @@ router = APIRouter(tags=["events"])
 
 KEEPALIVE_INTERVAL = 30  # seconds
 
+# Shutdown signal — set by lifespan to gracefully close SSE connections
+shutdown_event: asyncio.Event | None = None
+
+
+def set_shutdown_event(event: asyncio.Event):
+    """Called from lifespan to register the shutdown signal."""
+    global shutdown_event
+    shutdown_event = event
+
 
 async def _event_stream(request: Request, market_id: Optional[str] = None):
     """Async generator that yields SSE-formatted text.
@@ -47,6 +56,11 @@ async def _event_stream(request: Request, market_id: Optional[str] = None):
         yield ": connected\n\n"
 
         while True:
+            # Check if server is shutting down
+            if shutdown_event and shutdown_event.is_set():
+                logger.info("sse_shutdown_signal", market_id=market_id)
+                break
+
             # Check if the client disconnected
             if await request.is_disconnected():
                 break

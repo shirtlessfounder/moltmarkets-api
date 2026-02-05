@@ -100,10 +100,21 @@ async def lifespan(app: FastAPI):
     user_count = db.count_users()
     logger.info("api_started", market_count=market_count, user_count=user_count)
 
+    # Create shutdown event for SSE connections (issue: graceful shutdown)
+    from sse import set_shutdown_event
+    sse_shutdown = asyncio.Event()
+    set_shutdown_event(sse_shutdown)
+
     # Start background sweep for expired markets (issue #154)
     sweep_task = asyncio.create_task(_expired_market_sweep_loop())
 
     yield
+
+    # Signal SSE connections to close gracefully
+    logger.info("signaling_sse_shutdown")
+    sse_shutdown.set()
+    # Brief grace period for SSE connections to close
+    await asyncio.sleep(0.5)
 
     sweep_task.cancel()
     try:
