@@ -52,6 +52,11 @@ from storage import Storage
 # Configure structured JSON logging before anything else
 configure_logging()
 
+# Initialize Sentry for error monitoring (GitHub #176)
+# Set SENTRY_DSN environment variable to enable
+from monitoring import init_sentry
+init_sentry()
+
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
