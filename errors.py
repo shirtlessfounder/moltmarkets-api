@@ -40,6 +40,9 @@ class ErrorCode:
     # Input validation
     INVALID_INPUT = "INVALID_INPUT"
 
+    # Concurrency
+    CONFLICT = "CONFLICT"
+
     # Business logic
     INSUFFICIENT_BALANCE = "INSUFFICIENT_BALANCE"
     MARKET_CLOSED = "MARKET_CLOSED"

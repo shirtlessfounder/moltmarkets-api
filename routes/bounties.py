@@ -179,7 +179,7 @@ async def claim_bounty(bounty_id: str, user: dict = Depends(require_auth)):
     # Check expiry
     if bounty.get("expires_at") and bounty["expires_at"] < datetime.now(timezone.utc):
         # Auto-cancel expired bounty
-        db.update_bounty_status(bounty_id, "cancelled")
+        db.update_bounty_status(bounty_id, "cancelled", expected_status="open")
         db.update_user_balance(
             bounty["creator_id"], bounty["amount"],
             tx_type="escrow_refund",
@@ -187,7 +187,16 @@ async def claim_bounty(bounty_id: str, user: dict = Depends(require_auth)):
         )
         return error_response(400, "Bounty has expired", ErrorCode.INVALID_INPUT)
 
-    updated = db.update_bounty_status(bounty_id, "claimed", claimant_id=user["id"])
+    # Atomic claim - only succeeds if still open
+    updated = db.update_bounty_status(
+        bounty_id, "claimed",
+        claimant_id=user["id"],
+        expected_status="open"
+    )
+    if updated is None:
+        return error_response(409,
+            "Bounty is no longer available",
+            ErrorCode.CONFLICT)
 
     logger.info(
         "bounty_claimed id=%s claimant=%s amount=%s",
@@ -237,15 +246,23 @@ async def release_bounty(bounty_id: str, user: dict = Depends(require_auth)):
             "Bounty has no claimant",
             ErrorCode.INVALID_INPUT)
 
-    # Transfer from escrow to claimant
+    # Atomic status update FIRST - only succeeds if still claimed
+    updated = db.update_bounty_status(
+        bounty_id, "completed",
+        expected_status="claimed"
+    )
+    if updated is None:
+        return error_response(409,
+            "Bounty status changed, release failed",
+            ErrorCode.CONFLICT)
+
+    # Transfer from escrow to claimant AFTER status confirmed
     db.update_user_balance(
         bounty["claimant_id"], bounty["amount"],
         tx_type="escrow_release",
         related_user_id=bounty["creator_id"],
         metadata={"bounty_id": bounty_id, "title": bounty["title"][:100]},
     )
-
-    updated = db.update_bounty_status(bounty_id, "completed")
 
     logger.info(
         "bounty_released id=%s creator=%s claimant=%s amount=%s",
@@ -300,14 +317,22 @@ async def cancel_bounty(bounty_id: str, user: dict = Depends(require_auth)):
             f"Cannot cancel bounty with status '{bounty['status']}'",
             ErrorCode.INVALID_INPUT)
 
-    # Refund escrow to creator
+    # Atomic status update FIRST - verify status hasn't changed
+    updated = db.update_bounty_status(
+        bounty_id, "cancelled",
+        expected_status=bounty["status"]
+    )
+    if updated is None:
+        return error_response(409,
+            "Bounty status changed, cancel failed",
+            ErrorCode.CONFLICT)
+
+    # Refund escrow to creator AFTER status confirmed
     db.update_user_balance(
         user["id"], bounty["amount"],
         tx_type="escrow_refund",
         metadata={"bounty_id": bounty_id, "reason": "cancelled"},
     )
-
-    updated = db.update_bounty_status(bounty_id, "cancelled")
 
     logger.info(
         "bounty_cancelled id=%s creator=%s amount=%s was_claimed=%s",
