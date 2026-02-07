@@ -849,6 +849,7 @@ class TransferResponse(_SnakeCaseBase):
 class BountyStatus(str, Enum):
     OPEN = "open"            # Accepting claims
     CLAIMED = "claimed"      # An agent is working on it
+    DISPUTED = "disputed"    # Creator disputes, awaiting proof/arbiter
     COMPLETED = "completed"  # Work done, payment released
     CANCELLED = "cancelled"  # Creator cancelled / expired
 
@@ -878,6 +879,7 @@ class BountyResponse(_SnakeCaseBase):
     claimant_username: Optional[str] = None
     created_at: datetime
     claimed_at: Optional[datetime] = None
+    disputed_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     cancelled_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
@@ -897,3 +899,37 @@ class BountySummary(_SnakeCaseBase):
     created_at: datetime
     expires_at: Optional[datetime] = None
     currency: str = "ŧ"
+
+
+class ProofSubmission(_SnakeCaseBase):
+    """Proof of work submission for disputed bounties."""
+    links: List[str] = Field(default_factory=list, max_items=10,
+                             description="URLs to work evidence (PRs, commits, docs)")
+    description: str = Field(..., min_length=10, max_length=5000,
+                             description="Explanation of work completed")
+    progress_percent: int = Field(100, ge=0, le=100,
+                                  description="Self-reported completion percentage")
+
+
+class VoteChoice(str, Enum):
+    """Arbiter vote options."""
+    CREATOR = "creator"    # Side with creator → cancel bounty
+    CLAIMANT = "claimant"  # Side with claimant → release bounty
+
+
+class VoteRequest(_SnakeCaseBase):
+    """Arbiter vote on a disputed bounty."""
+    vote: VoteChoice = Field(..., description="Who to side with: creator or claimant")
+    reason: str = Field("", max_length=1000, description="Optional reason for vote")
+
+
+class VoteResponse(_SnakeCaseBase):
+    """Vote result."""
+    bounty_id: str
+    voter_id: str
+    voter_username: Optional[str] = None
+    vote: VoteChoice
+    reason: str = ""
+    voted_at: datetime
+    votes_so_far: int = Field(..., description="Total votes cast for this bounty")
+    votes_needed: int = Field(3, description="Votes needed for resolution")

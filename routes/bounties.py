@@ -24,6 +24,7 @@ from deps import get_db
 from errors import error_response, ErrorCode
 from models import (
     BountyCreate, BountyResponse, BountySummary, BountyStatus,
+    ProofSubmission, VoteRequest, VoteResponse, VoteChoice,
 )
 from utils import validate_uuid
 
@@ -351,3 +352,92 @@ async def cancel_bounty(bounty_id: str, user: dict = Depends(require_auth)):
     )))
 
     return BountyResponse(**_enrich_bounty(updated, db))
+
+
+# =============================================================================
+# Dispute (creator challenges claimed work)
+# =============================================================================
+
+@router.post("/bounties/{bounty_id}/dispute", response_model=BountyResponse)
+async def dispute_bounty(bounty_id: str, user: dict = Depends(require_auth)):
+    db = get_db()
+    validate_uuid(bounty_id, "bounty_id")
+    bounty = db.get_bounty(bounty_id)
+    if not bounty:
+        return error_response(404, "Bounty not found", ErrorCode.MARKET_NOT_FOUND)
+    if bounty["creator_id"] != user["id"]:
+        return error_response(403, "Only the bounty creator can initiate a dispute", ErrorCode.FORBIDDEN)
+    if bounty["status"] != "claimed":
+        return error_response(400, f"Cannot dispute bounty with status '{bounty['status']}'.", ErrorCode.INVALID_INPUT)
+
+    # Atomic transition: claimed → disputed
+    updated = db.update_bounty_status(bounty_id, "disputed", expected_status="claimed")
+    if updated is None:
+        return error_response(409, "Bounty status changed", ErrorCode.CONFLICT)
+    logger.info("bounty_disputed id=%s creator=%s claimant=%s", bounty_id, user["username"], bounty["claimant_id"])
+    claimant = db.get_user(bounty["claimant_id"])
+    asyncio.create_task(event_bus.publish(SSEEvent(event="bounty_disputed", data={"bounty_id": bounty_id, "creator": user["username"], "claimant": claimant["username"] if claimant else None, "title": bounty["title"], "amount": bounty["amount"]})))
+    return BountyResponse(**_enrich_bounty(updated, db))
+
+
+# =============================================================================
+# Proof (claimant submits evidence during dispute)
+# =============================================================================
+
+@router.post("/bounties/{bounty_id}/proof", response_model=BountyResponse)
+async def submit_proof(bounty_id: str, proof: ProofSubmission, user: dict = Depends(require_auth)):
+    db = get_db()
+    validate_uuid(bounty_id, "bounty_id")
+    bounty = db.get_bounty(bounty_id)
+    if not bounty:
+        return error_response(404, "Bounty not found", ErrorCode.MARKET_NOT_FOUND)
+    if bounty["claimant_id"] != user["id"]:
+        return error_response(403, "Only the claimant can submit proof", ErrorCode.FORBIDDEN)
+    if bounty["status"] != "disputed":
+        return error_response(400, f"Cannot submit proof for bounty with status '{bounty['status']}'.", ErrorCode.INVALID_INPUT)
+
+    logger.info("bounty_proof_submitted id=%s claimant=%s links=%d", bounty_id, user["username"], len(proof.links))
+    creator = db.get_user(bounty["creator_id"])
+    asyncio.create_task(event_bus.publish(SSEEvent(event="bounty_proof_submitted", data={"bounty_id": bounty_id, "claimant": user["username"], "creator": creator["username"] if creator else None, "title": bounty["title"], "amount": bounty["amount"], "links_count": len(proof.links), "progress_percent": proof.progress_percent})))
+    return BountyResponse(**_enrich_bounty(bounty, db))
+
+
+# =============================================================================
+# Vote (arbiter votes on disputed bounty)
+# =============================================================================
+
+VOTES_NEEDED = 3
+
+@router.post("/bounties/{bounty_id}/vote", response_model=VoteResponse)
+async def vote_on_bounty(bounty_id: str, vote_req: VoteRequest, user: dict = Depends(require_auth)):
+    db = get_db()
+    validate_uuid(bounty_id, "bounty_id")
+    bounty = db.get_bounty(bounty_id)
+    if not bounty:
+        return error_response(404, "Bounty not found", ErrorCode.MARKET_NOT_FOUND)
+    if bounty["status"] != "disputed":
+        return error_response(400, f"Cannot vote on bounty with status '{bounty['status']}'.", ErrorCode.INVALID_INPUT)
+    if bounty["creator_id"] == user["id"]:
+        return error_response(403, "Creator cannot vote", ErrorCode.FORBIDDEN)
+    if bounty["claimant_id"] == user["id"]:
+        return error_response(403, "Claimant cannot vote", ErrorCode.FORBIDDEN)
+
+    current_votes = db.count_votes(bounty_id)
+    if current_votes["total"] >= VOTES_NEEDED:
+        return error_response(400, "Voting is closed", ErrorCode.INVALID_INPUT)
+    vote_record = db.add_vote(bounty_id=bounty_id, voter_id=user["id"], vote=vote_req.vote.value, reason=vote_req.reason)
+    if vote_record is None:
+        return error_response(409, "You have already voted", ErrorCode.CONFLICT)
+    new_counts = db.count_votes(bounty_id)
+    logger.info("bounty_vote id=%s voter=%s vote=%s total=%d", bounty_id, user["username"], vote_req.vote.value, new_counts["total"])
+    if new_counts["total"] >= VOTES_NEEDED:
+        if new_counts["claimant"] > new_counts["creator"]:
+            db.update_bounty_status(bounty_id, "completed", expected_status="disputed")
+            db.update_user_balance(bounty["claimant_id"], bounty["amount"], tx_type="escrow_release", related_user_id=bounty["creator_id"], metadata={"bounty_id": bounty_id, "resolution": "arbiter_claimant"})
+            resolution = "claimant"
+        else:
+            db.update_bounty_status(bounty_id, "cancelled", expected_status="disputed")
+            db.update_user_balance(bounty["creator_id"], bounty["amount"], tx_type="escrow_refund", metadata={"bounty_id": bounty_id, "resolution": "arbiter_creator"})
+            resolution = "creator"
+        asyncio.create_task(event_bus.publish(SSEEvent(event="bounty_resolved", data={"bounty_id": bounty_id, "resolution": resolution, "votes": new_counts, "title": bounty["title"], "amount": bounty["amount"]})))
+    return VoteResponse(bounty_id=bounty_id, voter_id=user["id"], voter_username=user["username"], vote=vote_req.vote, reason=vote_req.reason, voted_at=vote_record["voted_at"], votes_so_far=new_counts["total"], votes_needed=VOTES_NEEDED)

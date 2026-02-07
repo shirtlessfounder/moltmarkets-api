@@ -46,6 +46,7 @@ class BountyStorageMixin:
                 "claimant_id": None,
                 "created_at": now,
                 "claimed_at": None,
+                "disputed_at": None,
                 "completed_at": None,
                 "cancelled_at": None,
                 "expires_at": expires_at,
@@ -161,6 +162,8 @@ class BountyStorageMixin:
                         b["claimant_id"] = claimant_id
                     if status == "claimed":
                         b["claimed_at"] = now
+                    elif status == "disputed":
+                        b["disputed_at"] = now
                     elif status == "completed":
                         b["completed_at"] = now
                     elif status == "cancelled":
@@ -179,6 +182,9 @@ class BountyStorageMixin:
                     params.append(claimant_id)
                 if status == "claimed":
                     set_parts.append("claimed_at = %s")
+                    params.append(now)
+                elif status == "disputed":
+                    set_parts.append("disputed_at = %s")
                     params.append(now)
                 elif status == "completed":
                     set_parts.append("completed_at = %s")
@@ -219,5 +225,62 @@ class BountyStorageMixin:
                 else:
                     cur.execute("SELECT COUNT(*) AS cnt FROM bounties")
                 return cur.fetchone()["cnt"]
+        finally:
+            self._put_conn(conn)
+
+    # ------------------------------------------------------------------
+    # Votes (arbiter votes on disputed bounties)
+    # ------------------------------------------------------------------
+
+    def _ensure_votes_store(self) -> None:
+        if not hasattr(self, "_bounty_votes"):
+            self._bounty_votes: List[Dict[str, Any]] = []
+
+    def add_vote(self, bounty_id: str, voter_id: str, vote: str, reason: str = "") -> Optional[Dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        if self._use_memory:
+            self._ensure_votes_store()
+            for v in self._bounty_votes:
+                if v["bounty_id"] == bounty_id and v["voter_id"] == voter_id:
+                    return None
+            vote_record = {"bounty_id": bounty_id, "voter_id": voter_id, "vote": vote, "reason": reason, "voted_at": now}
+            self._bounty_votes.append(vote_record)
+            return vote_record
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO bounty_votes (bounty_id, voter_id, vote, reason, voted_at) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (bounty_id, voter_id) DO NOTHING RETURNING *""", (bounty_id, voter_id, vote, reason, now))
+                row = cur.fetchone()
+                conn.commit()
+                return dict(row) if row else None
+        finally:
+            self._put_conn(conn)
+
+    def get_votes(self, bounty_id: str) -> List[Dict[str, Any]]:
+        if self._use_memory:
+            self._ensure_votes_store()
+            return [v for v in self._bounty_votes if v["bounty_id"] == bounty_id]
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM bounty_votes WHERE bounty_id = %s ORDER BY voted_at", (bounty_id,))
+                return [dict(row) for row in cur.fetchall()]
+        finally:
+            self._put_conn(conn)
+
+    def count_votes(self, bounty_id: str) -> Dict[str, int]:
+        if self._use_memory:
+            self._ensure_votes_store()
+            votes = [v for v in self._bounty_votes if v["bounty_id"] == bounty_id]
+            return {"creator": sum(1 for v in votes if v["vote"] == "creator"), "claimant": sum(1 for v in votes if v["vote"] == "claimant"), "total": len(votes)}
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT vote, COUNT(*) as cnt FROM bounty_votes WHERE bounty_id = %s GROUP BY vote", (bounty_id,))
+                counts = {"creator": 0, "claimant": 0, "total": 0}
+                for row in cur.fetchall():
+                    counts[row["vote"]] = row["cnt"]
+                    counts["total"] += row["cnt"]
+                return counts
         finally:
             self._put_conn(conn)
