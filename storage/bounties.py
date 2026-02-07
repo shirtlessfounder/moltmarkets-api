@@ -140,14 +140,22 @@ class BountyStorageMixin:
         bounty_id: str,
         status: str,
         claimant_id: Optional[str] = None,
+        expected_status: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Update bounty status and optionally set claimant."""
+        """Update bounty status and optionally set claimant.
+        
+        If expected_status is provided, performs atomic check-and-set.
+        Returns None if current status doesn't match expected (lost race).
+        """
         now = datetime.now(timezone.utc)
 
         if self._use_memory:
             self._ensure_bounties_store()
             for b in self._bounties:
                 if b["id"] == bounty_id:
+                    # Atomic check: verify current status before updating
+                    if expected_status is not None and b["status"] != expected_status:
+                        return None  # Lost the race
                     b["status"] = status
                     if claimant_id is not None:
                         b["claimant_id"] = claimant_id
@@ -180,9 +188,14 @@ class BountyStorageMixin:
                     params.append(now)
 
                 params.append(bounty_id)
+                where_clause = "WHERE id = %s"
+                if expected_status is not None:
+                    where_clause += " AND status = %s"
+                    params.append(expected_status)
+                    
                 cur.execute(f"""
                     UPDATE bounties SET {', '.join(set_parts)}
-                    WHERE id = %s RETURNING *
+                    {where_clause} RETURNING *
                 """, tuple(params))
                 row = cur.fetchone()
                 conn.commit()
