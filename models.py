@@ -933,3 +933,8 @@ class VoteResponse(_SnakeCaseBase):
     voted_at: datetime
     votes_so_far: int = Field(..., description="Total votes cast for this bounty")
     votes_needed: int = Field(3, description="Votes needed for resolution")
+
+
+class ContestRequest(_SnakeCaseBase):
+    """Request to contest (reject) submitted proof. Creator only."""
+    reason: str = Field("", max_length=1000, description="Why the proof is rejected")

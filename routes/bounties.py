@@ -24,7 +24,7 @@ from deps import get_db
 from errors import error_response, ErrorCode
 from models import (
     BountyCreate, BountyResponse, BountySummary, BountyStatus,
-    ProofSubmission, VoteRequest, VoteResponse, VoteChoice,
+    ProofSubmission, VoteRequest, VoteResponse, VoteChoice, ContestRequest,
 )
 from utils import validate_uuid
 
@@ -403,10 +403,49 @@ async def submit_proof(bounty_id: str, proof: ProofSubmission, user: dict = Depe
 
 
 # =============================================================================
-# Vote (arbiter votes on disputed bounty)
+# Contest (creator rejects proof, requests arbiter vote)
 # =============================================================================
 
 VOTES_NEEDED = 3
+
+
+@router.post("/bounties/{bounty_id}/contest", response_model=BountyResponse)
+async def contest_proof(
+    bounty_id: str,
+    contest: ContestRequest,
+    user: dict = Depends(require_auth)
+):
+    """Reject submitted proof and request arbiter vote. Creator only."""
+    db = get_db()
+    validate_uuid(bounty_id, "bounty_id")
+
+    bounty = db.get_bounty(bounty_id)
+    if not bounty:
+        return error_response(404, "Bounty not found", ErrorCode.MARKET_NOT_FOUND)
+
+    if bounty["creator_id"] != user["id"]:
+        return error_response(403, "Only the bounty creator can contest", ErrorCode.FORBIDDEN)
+
+    if bounty["status"] != "disputed":
+        return error_response(400, f"Cannot contest bounty with status '{bounty['status']}'.", ErrorCode.INVALID_INPUT)
+
+    logger.info("bounty_contested id=%s creator=%s reason_len=%d", bounty_id, user["username"], len(contest.reason))
+
+    claimant = db.get_user(bounty["claimant_id"])
+    asyncio.create_task(event_bus.publish(SSEEvent(
+        event="bounty_contested",
+        data={"bounty_id": bounty_id, "creator": user["username"],
+              "claimant": claimant["username"] if claimant else None,
+              "title": bounty["title"], "amount": bounty["amount"],
+              "reason": contest.reason[:200], "votes_needed": VOTES_NEEDED},
+    )))
+
+    return BountyResponse(**_enrich_bounty(bounty, db))
+
+
+# =============================================================================
+# Vote (arbiter votes on disputed bounty)
+# =============================================================================
 
 @router.post("/bounties/{bounty_id}/vote", response_model=VoteResponse)
 async def vote_on_bounty(bounty_id: str, vote_req: VoteRequest, user: dict = Depends(require_auth)):
